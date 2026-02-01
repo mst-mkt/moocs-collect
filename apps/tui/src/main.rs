@@ -8,7 +8,8 @@ mod ui;
 
 use app::App;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     color_eyre::install()?;
 
     let matches = Command::new("collect-tui")
@@ -34,5 +35,5 @@ fn main() -> Result<()> {
     let year = matches.get_one::<u32>("year").copied();
 
     let mut app = App::new(download_path, year);
-    app.run()
+    app.run().await
 }

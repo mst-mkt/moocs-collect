@@ -24,6 +24,7 @@ use crate::service::{
 use reqwest::Client;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct Collect {
     course_service: Arc<dyn CourseService>,
     lecture_service: Arc<dyn LectureService>,

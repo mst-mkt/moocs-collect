@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub primary: Color,
     pub secondary: Color,
@@ -20,29 +20,33 @@ impl Default for Theme {
 }
 
 impl Theme {
-    pub fn title_style(&self) -> Style {
-        Style::default()
-            .fg(self.primary)
-            .add_modifier(Modifier::BOLD)
+    #[must_use]
+    pub const fn title_style(&self) -> Style {
+        Style::new().fg(self.primary).add_modifier(Modifier::BOLD)
     }
 
-    pub fn error_style(&self) -> Style {
-        Style::default().fg(self.error).add_modifier(Modifier::BOLD)
+    #[must_use]
+    pub const fn error_style(&self) -> Style {
+        Style::new().fg(self.error).add_modifier(Modifier::BOLD)
     }
 
-    pub fn normal_style(&self) -> Style {
-        Style::default().fg(self.foreground)
+    #[must_use]
+    pub const fn normal_style(&self) -> Style {
+        Style::new().fg(self.foreground)
     }
 
-    pub fn inactive_style(&self) -> Style {
-        Style::default().fg(self.secondary)
+    #[must_use]
+    pub const fn inactive_style(&self) -> Style {
+        Style::new().fg(self.secondary)
     }
 
-    pub fn border_style(&self) -> Style {
-        Style::default().fg(self.secondary)
+    #[must_use]
+    pub const fn border_style(&self) -> Style {
+        Style::new().fg(self.secondary)
     }
 
-    pub fn focused_border_style(&self) -> Style {
-        Style::default().fg(self.primary)
+    #[must_use]
+    pub const fn focused_border_style(&self) -> Style {
+        Style::new().fg(self.primary)
     }
 }

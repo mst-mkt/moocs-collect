@@ -5,11 +5,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use tui_input::backend::crossterm::EventHandler;
-use tui_input::Input;
+use tui_input::{backend::crossterm::EventHandler, Input};
 
 use super::Component;
-use crate::ui::theme::Theme;
+use crate::ui::Theme;
 
 #[derive(Debug, Clone)]
 pub enum LoginAction {
@@ -17,8 +16,9 @@ pub enum LoginAction {
     SwitchField,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputField {
+    #[default]
     Username,
     Password,
 }
@@ -28,6 +28,7 @@ pub struct LoginComponent {
     password_input: Input,
     current_field: InputField,
     theme: Theme,
+    loading: bool,
 }
 
 impl Component for LoginComponent {
@@ -39,6 +40,7 @@ impl Component for LoginComponent {
             password_input: Input::default(),
             current_field: InputField::Username,
             theme: Theme::default(),
+            loading: false,
         }
     }
 
@@ -148,6 +150,10 @@ impl Component for LoginComponent {
 }
 
 impl LoginComponent {
+    pub const fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
+    }
+
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<LoginAction> {
         match key.code {
             KeyCode::Tab => Some(LoginAction::SwitchField),
