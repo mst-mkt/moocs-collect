@@ -1,0 +1,19 @@
+[package]
+name = "collect-tui"
+version = "0.0.0"
+edition = "2021"
+
+
+[dependencies]
+collect = { path = "../../" }
+
+tokio = { workspace = true }
+ratatui = "0.28.1"
+crossterm = "0.28.1"
+color-eyre = "0.6.3"
+tui-input = "0.10.0"
+clap = { version = "4.5.20", features = ["derive"] }
+
+[[bin]]
+name = "collect-tui"
+path = "src/main.rs"

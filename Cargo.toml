@@ -28,6 +28,7 @@ members = [
     "apps/cli",
     "apps/desktop/src-tauri",
     "apps/merge",
+    "apps/tui",
 ]
 resolver = "2"
 
