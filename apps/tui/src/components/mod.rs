@@ -2,8 +2,10 @@ use crossterm::event::Event;
 use ratatui::{layout::Rect, Frame};
 
 pub mod login;
+pub mod selector;
 
 pub use login::LoginComponent;
+pub use selector::SelectorComponent;
 
 pub trait Component {
     type Action: Clone + std::fmt::Debug;
