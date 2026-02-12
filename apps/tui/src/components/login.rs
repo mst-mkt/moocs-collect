@@ -87,7 +87,7 @@ impl Component for LoginComponent {
         frame.render_widget(password, areas.password);
 
         // Help
-        let help = Paragraph::new("Tab: 切替 | Enter: ログイン | Ctrl+C: 終了")
+        let help = Paragraph::new("Tab: 切替 | Enter: 決定 | q: 終了")
             .alignment(Alignment::Center)
             .style(self.theme.inactive_style());
         frame.render_widget(help, areas.help);
@@ -165,13 +165,29 @@ impl LoginComponent {
                 };
                 None
             }
+            KeyCode::BackTab => {
+                self.current_field = match self.current_field {
+                    InputField::Username => InputField::Password,
+                    InputField::Password => InputField::Username,
+                };
+                None
+            }
             KeyCode::Enter => {
-                let username = self.username_input.value().trim().to_string();
-                let password = self.password_input.value().to_string();
-                if !username.is_empty() && !password.is_empty() {
-                    Some(LoginAction::Submit(Credentials { username, password }))
-                } else {
-                    None
+                match self.current_field {
+                    InputField::Username => {
+                        // Move to password field
+                        self.current_field = InputField::Password;
+                        None
+                    }
+                    InputField::Password => {
+                        let username = self.username_input.value().trim().to_string();
+                        let password = self.password_input.value().to_string();
+                        if !username.is_empty() && !password.is_empty() {
+                            Some(LoginAction::Submit(Credentials { username, password }))
+                        } else {
+                            None
+                        }
+                    }
                 }
             }
             _ => {

@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use collect::PageKey;
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use ratatui::{
@@ -53,7 +55,7 @@ pub enum DownloadAction {}
 
 pub struct DownloadComponent {
     items: Vec<DownloadItem>,
-    list_state: ListState,
+    list_state: RefCell<ListState>,
     theme: Theme,
 }
 
@@ -63,7 +65,7 @@ impl Component for DownloadComponent {
     fn new() -> Self {
         Self {
             items: Vec::new(),
-            list_state: ListState::default(),
+            list_state: RefCell::new(ListState::default()),
             theme: Theme::default(),
         }
     }
@@ -94,8 +96,8 @@ impl DownloadComponent {
                 status: DownloadStatus::Pending,
             });
         }
-        if !self.items.is_empty() && self.list_state.selected().is_none() {
-            self.list_state.select(Some(0));
+        if !self.items.is_empty() && self.list_state.borrow().selected().is_none() {
+            self.list_state.borrow_mut().select(Some(0));
         }
     }
 
@@ -144,13 +146,13 @@ impl DownloadComponent {
         if len == 0 {
             return;
         }
-        let current = self.list_state.selected().unwrap_or(0);
+        let current = self.list_state.borrow().selected().unwrap_or(0);
         let next = if delta > 0 {
             current.saturating_add(delta as usize).min(len - 1)
         } else {
             current.saturating_sub(delta.unsigned_abs() as usize)
         };
-        self.list_state.select(Some(next));
+        self.list_state.borrow_mut().select(Some(next));
     }
 
     fn render_download_list(&self, frame: &mut Frame, area: Rect) {
@@ -159,7 +161,7 @@ impl DownloadComponent {
         let separator_width = inner_width.saturating_sub(1); // right margin only
         let separator = "─".repeat(separator_width);
 
-        let selected_idx = self.list_state.selected();
+        let selected_idx = self.list_state.borrow().selected();
 
         let list_items: Vec<ListItem> = self
             .items
@@ -244,7 +246,7 @@ impl DownloadComponent {
 
         let list = List::new(list_items).block(block);
 
-        frame.render_stateful_widget(list, area, &mut self.list_state.clone());
+        frame.render_stateful_widget(list, area, &mut self.list_state.borrow_mut());
     }
 
     fn build_summary_title(&self) -> Line<'_> {

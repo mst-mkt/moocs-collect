@@ -131,13 +131,17 @@ impl App {
                 self.dispatch(action);
             }
 
-            if event::poll(Duration::from_millis(50))? {
+            // Process all available events before next render
+            while event::poll(Duration::ZERO)? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
                         self.handle_key(key.code, key.modifiers);
                     }
                 }
             }
+
+            // Sleep briefly to avoid busy-waiting when idle
+            std::thread::sleep(Duration::from_millis(16));
         }
         Ok(())
     }
