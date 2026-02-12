@@ -30,11 +30,21 @@ async fn main() -> Result<()> {
                 .help("Target year")
                 .value_parser(clap::value_parser!(u32)),
         )
+        .arg(
+            Arg::new("concurrency")
+                .long("concurrency")
+                .short('j')
+                .value_name("NUM")
+                .help("Number of concurrent downloads")
+                .default_value("5")
+                .value_parser(clap::value_parser!(usize)),
+        )
         .get_matches();
 
     let download_path = matches.get_one::<PathBuf>("path").cloned();
     let year = matches.get_one::<u32>("year").copied();
+    let concurrency = matches.get_one::<usize>("concurrency").copied().unwrap();
 
-    let mut app = App::new(download_path, year);
+    let mut app = App::new(download_path, year, concurrency);
     app.run()
 }

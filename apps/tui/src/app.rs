@@ -18,7 +18,6 @@ use crate::components::{
 };
 use crate::ui::{self, terminal, Theme, Tui};
 
-const MAX_CONCURRENT_DOWNLOADS: usize = 5;
 const MAX_HTTP_PERMITS: usize = 8;
 /// Minimum footer width for responsive layout
 const MIN_FOOTER_WIDTH: u16 = 60;
@@ -69,6 +68,7 @@ pub struct App {
     running: bool,
     year: Option<u32>,
     download_path: PathBuf,
+    concurrency: usize,
     login: LoginComponent,
     selector: SelectorComponent,
     download: DownloadComponent,
@@ -84,7 +84,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(download_path: Option<PathBuf>, year: Option<u32>) -> Self {
+    pub fn new(download_path: Option<PathBuf>, year: Option<u32>, concurrency: usize) -> Self {
         let (action_tx, action_rx) = mpsc::channel(32);
 
         let client = reqwest::Client::builder()
@@ -101,6 +101,7 @@ impl App {
             running: true,
             year,
             download_path: download_path.unwrap_or_else(|| PathBuf::from(".")),
+            concurrency,
             login: LoginComponent::new(),
             selector: SelectorComponent::new(),
             download: DownloadComponent::new(),
@@ -537,7 +538,7 @@ impl App {
     }
 
     fn fill_download_slots(&mut self) {
-        while self.download.active_count() < MAX_CONCURRENT_DOWNLOADS {
+        while self.download.active_count() < self.concurrency {
             if let Some(page_key) = self.download.next_pending() {
                 self.download.update_progress(&page_key, 0, "開始中...");
                 self.start_download(page_key);
