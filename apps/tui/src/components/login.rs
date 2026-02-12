@@ -49,34 +49,13 @@ impl Component for LoginComponent {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
-        let [_, center, _] = Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Length(11),
-            Constraint::Fill(1),
-        ])
-        .areas(area);
-
-        let [_, form_area, _] = Layout::horizontal([
-            Constraint::Fill(1),
-            Constraint::Max(50),
-            Constraint::Fill(1),
-        ])
-        .areas(center);
-
-        let [title_area, username_area, password_area, help_area] = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(2),
-        ])
-        .areas(form_area);
+        let areas = compute_form_areas(area);
 
         // Title
         let title = Paragraph::new("MOOCs Collect")
             .alignment(Alignment::Center)
-            .style(self.theme.title_style())
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(title, title_area);
+            .style(self.theme.title_style());
+        frame.render_widget(title, areas.title);
 
         // Username
         let username_focused = self.current_field == InputField::Username;
@@ -90,7 +69,7 @@ impl Component for LoginComponent {
                     self.theme.inactive_style()
                 }),
         );
-        frame.render_widget(username, username_area);
+        frame.render_widget(username, areas.username);
 
         // Password
         let password_focused = self.current_field == InputField::Password;
@@ -105,32 +84,78 @@ impl Component for LoginComponent {
                     self.theme.inactive_style()
                 }),
         );
-        frame.render_widget(password, password_area);
+        frame.render_widget(password, areas.password);
 
         // Help
-        let help = Paragraph::new("Tab: Switch | Enter: Login | Ctrl+C: Quit")
+        let help = Paragraph::new("Tab: 切替 | Enter: ログイン | Ctrl+C: 終了")
             .alignment(Alignment::Center)
             .style(self.theme.inactive_style());
-        frame.render_widget(help, help_area);
+        frame.render_widget(help, areas.help);
+    }
+}
 
-        // Cursor
-        #[allow(clippy::cast_possible_truncation)]
-        let (cursor_x, cursor_y) = if username_focused {
-            (
-                username_area.x + self.username_input.visual_cursor() as u16 + 1,
-                username_area.y + 1,
-            )
-        } else {
-            (
-                password_area.x + self.password_input.visual_cursor() as u16 + 1,
-                password_area.y + 1,
-            )
-        };
-        frame.set_cursor_position((cursor_x, cursor_y));
+/// Layout areas for the login form
+struct FormAreas {
+    title: Rect,
+    username: Rect,
+    password: Rect,
+    help: Rect,
+}
+
+fn compute_form_areas(area: Rect) -> FormAreas {
+    let [_, center, _] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(10),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+
+    let [_, form_area, _] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Max(50),
+        Constraint::Fill(1),
+    ])
+    .areas(center);
+
+    let [title_area, _gap, username_area, password_area, help_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(2),
+    ])
+    .areas(form_area);
+
+    FormAreas {
+        title: title_area,
+        username: username_area,
+        password: password_area,
+        help: help_area,
     }
 }
 
 impl LoginComponent {
+    /// Render the cursor at the current input field position.
+    /// Call separately so callers can skip it when a popup is visible.
+    pub fn render_cursor(&self, frame: &mut Frame, area: Rect) {
+        let areas = compute_form_areas(area);
+        let username_focused = self.current_field == InputField::Username;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let (cursor_x, cursor_y) = if username_focused {
+            (
+                areas.username.x + self.username_input.visual_cursor() as u16 + 1,
+                areas.username.y + 1,
+            )
+        } else {
+            (
+                areas.password.x + self.password_input.visual_cursor() as u16 + 1,
+                areas.password.y + 1,
+            )
+        };
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<LoginAction> {
         match key.code {
             KeyCode::Tab => {

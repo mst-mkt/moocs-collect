@@ -1,15 +1,18 @@
 use collect::PageKey;
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState},
     Frame,
 };
 
 use super::Component;
 use crate::ui::Theme;
+
+/// Width of the progress bar in characters
+const PROGRESS_BAR_WIDTH: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedPage {
@@ -151,67 +154,100 @@ impl DownloadComponent {
     }
 
     fn render_download_list(&self, frame: &mut Frame, area: Rect) {
-        let [summary_area, list_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+        // Item list - separator width accounts for borders(2) + highlight_symbol(2), with right margin
+        let inner_width = area.width.saturating_sub(4) as usize;
+        let separator_width = inner_width.saturating_sub(1); // right margin only
+        let separator = "─".repeat(separator_width);
 
-        // Summary bar
-        self.render_summary(frame, summary_area);
+        let selected_idx = self.list_state.selected();
 
-        // Item list
         let list_items: Vec<ListItem> = self
             .items
             .iter()
-            .map(|item| {
+            .enumerate()
+            .map(|(idx, item)| {
+                let is_selected = selected_idx == Some(idx);
+
+                let marker = if is_selected {
+                    Span::styled(
+                        "> ",
+                        Style::default()
+                            .fg(self.theme.primary)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::raw("  ")
+                };
+
+                let path_style = if is_selected {
+                    Style::default()
+                        .fg(self.theme.primary)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    self.theme.normal_style()
+                };
                 let path_line =
-                    Line::from(Span::styled(item.display_path(), self.theme.normal_style()));
+                    Line::from(vec![marker, Span::styled(item.display_path(), path_style)]);
 
                 let status_line = match &item.status {
                     DownloadStatus::Pending => {
-                        Line::from(Span::styled("  待機中", self.theme.inactive_style()))
+                        let bar = format!("{}  待機中", "░".repeat(PROGRESS_BAR_WIDTH));
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(bar, self.theme.inactive_style()),
+                        ])
                     }
                     DownloadStatus::Downloading(pct, phase) => {
-                        let filled = (*pct as usize) / 5;
-                        let empty = 20 - filled;
-                        let bar = format!(
-                            "  [{}{}] {}% {phase}",
-                            "#".repeat(filled),
-                            ".".repeat(empty),
-                            pct
-                        );
-                        Line::from(Span::styled(bar, Style::default().fg(self.theme.primary)))
+                        let filled = (*pct as usize) * PROGRESS_BAR_WIDTH / 100;
+                        let empty = PROGRESS_BAR_WIDTH - filled;
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                "█".repeat(filled),
+                                Style::default().fg(self.theme.primary),
+                            ),
+                            Span::styled("░".repeat(empty), self.theme.dim_style()),
+                            Span::styled(
+                                format!("  {pct}% {phase}"),
+                                Style::default().fg(self.theme.primary),
+                            ),
+                        ])
                     }
-                    DownloadStatus::Completed => Line::from(Span::styled(
-                        "  [####################] 100% 完了",
-                        self.theme.success_style(),
-                    )),
-                    DownloadStatus::Failed(msg) => Line::from(Span::styled(
-                        format!("  エラー: {msg}"),
-                        self.theme.error_style(),
-                    )),
+                    DownloadStatus::Completed => Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("█".repeat(PROGRESS_BAR_WIDTH), self.theme.success_style()),
+                        Span::styled(" 100% 完了", self.theme.success_style()),
+                    ]),
+                    DownloadStatus::Failed(msg) => Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(format!("✗ エラー: {msg}"), self.theme.error_style()),
+                    ]),
                 };
 
-                ListItem::new(vec![path_line, status_line, Line::default()])
+                let sep_line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(&*separator, self.theme.dim_style()),
+                ]);
+
+                ListItem::new(vec![path_line, status_line, sep_line])
             })
             .collect();
 
+        // Build summary as title_bottom
+        let summary_title = self.build_summary_title();
+
         let block = Block::default()
             .title(" ダウンロード ")
+            .title_bottom(summary_title)
             .borders(Borders::ALL)
             .border_style(self.theme.focused_border_style());
 
-        let list = List::new(list_items)
-            .block(block)
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::REVERSED)
-                    .fg(self.theme.primary),
-            )
-            .highlight_symbol("> ");
+        let list = List::new(list_items).block(block);
 
-        frame.render_stateful_widget(list, list_area, &mut self.list_state.clone());
+        frame.render_stateful_widget(list, area, &mut self.list_state.clone());
     }
 
-    fn render_summary(&self, frame: &mut Frame, area: Rect) {
+    fn build_summary_title(&self) -> Line<'_> {
         let total = self.items.len();
         let completed = self
             .items
@@ -230,28 +266,29 @@ impl DownloadComponent {
             .count();
 
         let mut spans = vec![
-            Span::styled(format!(" 全{total}件"), self.theme.normal_style()),
-            Span::styled("  ", Style::default()),
-            Span::styled(format!("完了: {completed}"), self.theme.success_style()),
+            Span::styled(" 全 ", self.theme.normal_style()),
+            Span::styled(format!("{total}"), self.theme.title_style()),
+            Span::styled(" 件", self.theme.normal_style()),
+            Span::raw("  "),
+            Span::styled("完了: ", self.theme.inactive_style()),
+            Span::styled(format!("{completed}"), self.theme.success_style()),
         ];
 
         if downloading > 0 {
-            spans.push(Span::styled("  ", Style::default()));
+            spans.push(Span::styled("  実行中: ", self.theme.inactive_style()));
             spans.push(Span::styled(
-                format!("実行中: {downloading}"),
+                format!("{downloading}"),
                 Style::default().fg(self.theme.primary),
             ));
         }
 
         if failed > 0 {
-            spans.push(Span::styled("  ", Style::default()));
-            spans.push(Span::styled(
-                format!("失敗: {failed}"),
-                self.theme.error_style(),
-            ));
+            spans.push(Span::styled("  失敗: ", self.theme.inactive_style()));
+            spans.push(Span::styled(format!("{failed}"), self.theme.error_style()));
         }
 
-        let paragraph = Paragraph::new(Line::from(spans));
-        frame.render_widget(paragraph, area);
+        spans.push(Span::raw(" "));
+
+        Line::from(spans)
     }
 }

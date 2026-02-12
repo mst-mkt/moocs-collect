@@ -33,12 +33,21 @@ pub fn render_loading(frame: &mut Frame, message: &str, theme: &Theme) {
         .borders(Borders::ALL)
         .border_style(theme.focused_border_style());
 
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let [_, text_area, _] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(inner);
+
     let paragraph = Paragraph::new(message)
-        .block(block)
         .alignment(Alignment::Center)
         .style(theme.normal_style());
 
-    frame.render_widget(paragraph, popup_area);
+    frame.render_widget(paragraph, text_area);
 }
 
 /// Render an error popup

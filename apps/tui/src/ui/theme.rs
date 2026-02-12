@@ -7,6 +7,7 @@ pub struct Theme {
     pub error: Color,
     pub success: Color,
     pub foreground: Color,
+    pub dim: Color,
 }
 
 impl Default for Theme {
@@ -17,6 +18,7 @@ impl Default for Theme {
             error: Color::Red,
             success: Color::Green,
             foreground: Color::White,
+            dim: Color::DarkGray,
         }
     }
 }
@@ -50,5 +52,15 @@ impl Theme {
     #[must_use]
     pub const fn focused_border_style(&self) -> Style {
         Style::new().fg(self.primary)
+    }
+
+    #[must_use]
+    pub const fn dim_style(&self) -> Style {
+        Style::new().fg(self.dim)
+    }
+
+    #[must_use]
+    pub const fn key_style(&self) -> Style {
+        Style::new().fg(self.primary).add_modifier(Modifier::BOLD)
     }
 }

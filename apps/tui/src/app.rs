@@ -5,7 +5,7 @@ use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Tabs},
     Frame,
 };
@@ -20,6 +20,8 @@ use crate::ui::{self, terminal, Theme, Tui};
 
 const MAX_CONCURRENT_DOWNLOADS: usize = 5;
 const MAX_HTTP_PERMITS: usize = 8;
+/// Minimum footer width for responsive layout
+const MIN_FOOTER_WIDTH: u16 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Screen {
@@ -143,11 +145,22 @@ impl App {
     fn render(&self, frame: &mut Frame) {
         let area = frame.area();
 
+        let has_popup = self.authenticating || self.loading_courses || self.error.is_some();
+
         match self.screen {
-            Screen::Login => self.login.render(frame, area),
+            Screen::Login => {
+                self.login.render(frame, area);
+                if !has_popup {
+                    self.login.render_cursor(frame, area);
+                }
+            }
             Screen::Main => {
-                let [tab_area, content_area] =
-                    Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
+                let [tab_area, content_area, footer_area] = Layout::vertical([
+                    Constraint::Length(3),
+                    Constraint::Fill(1),
+                    Constraint::Length(3),
+                ])
+                .areas(area);
 
                 self.render_tab_bar(frame, tab_area);
 
@@ -155,6 +168,8 @@ impl App {
                     Tab::Selector => self.selector.render(frame, content_area),
                     Tab::Download => self.download.render(frame, content_area),
                 }
+
+                self.render_footer(frame, footer_area);
             }
         }
 
@@ -172,20 +187,102 @@ impl App {
     }
 
     fn render_tab_bar(&self, frame: &mut Frame, area: Rect) {
-        let titles = vec![Line::from(" 選択 "), Line::from(" ダウンロード ")];
+        let titles = vec![Line::from("講義一覧"), Line::from("ダウンロード")];
         let selected = match self.active_tab {
             Tab::Selector => 0,
             Tab::Download => 1,
         };
 
         let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::BOTTOM))
+            .block(
+                Block::default()
+                    .title(" MOOCs Collect ")
+                    .borders(Borders::ALL),
+            )
             .select(selected)
             .style(self.theme.inactive_style())
             .highlight_style(self.theme.title_style())
-            .divider("|");
+            .divider("│");
 
         frame.render_widget(tabs, area);
+    }
+
+    fn render_footer(&self, frame: &mut Frame, area: Rect) {
+        let ks = self.theme.key_style();
+        let ds = self.theme.inactive_style();
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(self.theme.dim_style());
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let nav_spans = match self.active_tab {
+            Tab::Selector => vec![
+                Span::styled("↑↓", ks),
+                Span::styled(": 移動", ds),
+                Span::raw("  "),
+                Span::styled("←→", ks),
+                Span::styled(": カラム切替", ds),
+                Span::raw("  "),
+                Span::styled("Tab", ks),
+                Span::styled(": タブ切替", ds),
+            ],
+            Tab::Download => vec![
+                Span::styled("↑↓", ks),
+                Span::styled(": 移動", ds),
+                Span::raw("  "),
+                Span::styled("Tab", ks),
+                Span::styled(": タブ切替", ds),
+            ],
+        };
+
+        let action_spans = match self.active_tab {
+            Tab::Selector => vec![
+                Span::styled("Space", ks),
+                Span::styled(": 選択", ds),
+                Span::raw("  "),
+                Span::styled("Enter", ks),
+                Span::styled(": 確定", ds),
+                Span::raw("  "),
+                Span::styled("q", ks),
+                Span::styled(": 終了", ds),
+            ],
+            Tab::Download => vec![Span::styled("q", ks), Span::styled(": 終了", ds)],
+        };
+
+        // Responsive: use left-right layout if wide enough, fall back to simplified help
+        if inner.width >= MIN_FOOTER_WIDTH {
+            // Single row: navigation on the left, actions on the right
+            let [left_area, right_area] =
+                Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(inner);
+
+            let mut left_spans = vec![Span::raw(" ")];
+            left_spans.extend(nav_spans);
+
+            let mut right_spans = action_spans;
+            right_spans.push(Span::raw(" "));
+
+            let left_line = ratatui::widgets::Paragraph::new(Line::from(left_spans));
+            let right_line = ratatui::widgets::Paragraph::new(Line::from(right_spans))
+                .alignment(ratatui::layout::Alignment::Right);
+
+            frame.render_widget(left_line, left_area);
+            frame.render_widget(right_line, right_area);
+        } else {
+            // Narrow screen: show simplified single-line help
+            let simplified_spans = vec![
+                Span::raw(" "),
+                Span::styled("Tab", ks),
+                Span::styled(": タブ", ds),
+                Span::raw("  "),
+                Span::styled("q", ks),
+                Span::styled(": 終了", ds),
+            ];
+            let paragraph = ratatui::widgets::Paragraph::new(Line::from(simplified_spans));
+            frame.render_widget(paragraph, inner);
+        }
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
