@@ -22,7 +22,7 @@ pub struct ResolvedPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownloadStatus {
     Pending,
-    Downloading(u8),
+    Downloading(u8, String),
     Completed,
     Failed(String),
 }
@@ -103,15 +103,16 @@ impl DownloadComponent {
             .map(|item| item.page_key.clone())
     }
 
-    pub fn has_active_download(&self) -> bool {
+    pub fn active_count(&self) -> usize {
         self.items
             .iter()
-            .any(|item| matches!(item.status, DownloadStatus::Downloading(_)))
+            .filter(|item| matches!(item.status, DownloadStatus::Downloading(..)))
+            .count()
     }
 
-    pub fn update_progress(&mut self, page_key: &PageKey, progress: u8) {
+    pub fn update_progress(&mut self, page_key: &PageKey, progress: u8, phase: &str) {
         if let Some(item) = self.items.iter_mut().find(|i| &i.page_key == page_key) {
-            item.status = DownloadStatus::Downloading(progress.min(100));
+            item.status = DownloadStatus::Downloading(progress.min(100), phase.to_string());
         }
     }
 
@@ -150,11 +151,8 @@ impl DownloadComponent {
     }
 
     fn render_download_list(&self, frame: &mut Frame, area: Rect) {
-        let [summary_area, list_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Fill(1),
-        ])
-        .areas(area);
+        let [summary_area, list_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
 
         // Summary bar
         self.render_summary(frame, summary_area);
@@ -164,28 +162,23 @@ impl DownloadComponent {
             .items
             .iter()
             .map(|item| {
-                let path_line = Line::from(Span::styled(
-                    item.display_path(),
-                    self.theme.normal_style(),
-                ));
+                let path_line =
+                    Line::from(Span::styled(item.display_path(), self.theme.normal_style()));
 
                 let status_line = match &item.status {
                     DownloadStatus::Pending => {
                         Line::from(Span::styled("  待機中", self.theme.inactive_style()))
                     }
-                    DownloadStatus::Downloading(pct) => {
+                    DownloadStatus::Downloading(pct, phase) => {
                         let filled = (*pct as usize) / 5;
                         let empty = 20 - filled;
                         let bar = format!(
-                            "  [{}{}] {}% ダウンロード中",
+                            "  [{}{}] {}% {phase}",
                             "#".repeat(filled),
                             ".".repeat(empty),
                             pct
                         );
-                        Line::from(Span::styled(
-                            bar,
-                            Style::default().fg(self.theme.primary),
-                        ))
+                        Line::from(Span::styled(bar, Style::default().fg(self.theme.primary)))
                     }
                     DownloadStatus::Completed => Line::from(Span::styled(
                         "  [####################] 100% 完了",
@@ -228,7 +221,7 @@ impl DownloadComponent {
         let downloading = self
             .items
             .iter()
-            .filter(|i| matches!(i.status, DownloadStatus::Downloading(_)))
+            .filter(|i| matches!(i.status, DownloadStatus::Downloading(..)))
             .count();
         let failed = self
             .items
@@ -237,15 +230,9 @@ impl DownloadComponent {
             .count();
 
         let mut spans = vec![
-            Span::styled(
-                format!(" 全{total}件"),
-                self.theme.normal_style(),
-            ),
+            Span::styled(format!(" 全{total}件"), self.theme.normal_style()),
             Span::styled("  ", Style::default()),
-            Span::styled(
-                format!("完了: {completed}"),
-                self.theme.success_style(),
-            ),
+            Span::styled(format!("完了: {completed}"), self.theme.success_style()),
         ];
 
         if downloading > 0 {

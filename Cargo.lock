@@ -1019,11 +1019,15 @@ dependencies = [
 name = "collect-tui"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "clap",
  "collect",
  "color-eyre",
  "crossterm",
+ "futures",
  "ratatui",
+ "rayon",
+ "reqwest",
  "tokio",
  "tui-input",
 ]

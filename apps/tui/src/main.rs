@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod app;
 mod components;
+mod download;
 mod ui;
 
 use app::App;

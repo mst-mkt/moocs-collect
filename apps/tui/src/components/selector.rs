@@ -214,8 +214,7 @@ impl SelectorComponent {
     }
 
     pub fn set_pages(&mut self, pages: Vec<LecturePage>, for_lecture: &LectureKey) {
-        self.pages_cache
-            .insert(for_lecture.clone(), pages.clone());
+        self.pages_cache.insert(for_lecture.clone(), pages.clone());
 
         if self.focused_lecture_key.as_ref() != Some(for_lecture) {
             return;

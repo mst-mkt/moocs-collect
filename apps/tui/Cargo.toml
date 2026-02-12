@@ -9,7 +9,11 @@ workspace = true
 [dependencies]
 collect = { path = "../../" }
 
+anyhow = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
+rayon = { workspace = true }
 ratatui = "0.28.1"
 crossterm = "0.28.1"
 color-eyre = "0.6.3"

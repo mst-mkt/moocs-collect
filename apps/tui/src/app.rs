@@ -1,4 +1,6 @@
-use collect::{Collect, Course, CourseKey, Credentials, Lecture, LectureKey, LecturePage, PageKey, Year};
+use collect::{
+    Collect, Course, CourseKey, Credentials, Lecture, LectureKey, LecturePage, PageKey, Year,
+};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -7,14 +9,17 @@ use ratatui::{
     widgets::{Block, Borders, Tabs},
     Frame,
 };
-use std::{path::PathBuf, time::Duration};
-use tokio::sync::mpsc;
+use std::{path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::components::{
     login::LoginAction, selector::SelectorAction, Component, DownloadComponent, LoginComponent,
     SelectorComponent,
 };
 use crate::ui::{self, terminal, Theme, Tui};
+
+const MAX_CONCURRENT_DOWNLOADS: usize = 5;
+const MAX_HTTP_PERMITS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Screen {
@@ -47,24 +52,28 @@ pub enum AppAction {
     SwitchTab(Tab),
     EnqueueDownloads,
     StartNextDownload,
-    DownloadProgress(PageKey, u8),
+    DownloadProgress(PageKey, u8, String),
     DownloadCompleted(PageKey),
     DownloadFailed(PageKey, String),
     ClearError,
     Quit,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     screen: Screen,
     active_tab: Tab,
     error: Option<String>,
     running: bool,
     year: Option<u32>,
+    download_path: PathBuf,
     login: LoginComponent,
     selector: SelectorComponent,
     download: DownloadComponent,
     theme: Theme,
+    client: reqwest::Client,
     collect: Collect,
+    semaphore: Arc<Semaphore>,
     action_tx: mpsc::Sender<AppAction>,
     action_rx: mpsc::Receiver<AppAction>,
     authenticating: bool,
@@ -73,9 +82,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(_download_path: Option<PathBuf>, year: Option<u32>) -> Self {
+    pub fn new(download_path: Option<PathBuf>, year: Option<u32>) -> Self {
         let (action_tx, action_rx) = mpsc::channel(32);
-        let collect = Collect::default();
+
+        let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0")
+            .cookie_store(true)
+            .build()
+            .unwrap_or_default();
+        let collect = Collect::from(Arc::new(client.clone()));
 
         Self {
             screen: Screen::default(),
@@ -83,11 +98,14 @@ impl App {
             error: None,
             running: true,
             year,
+            download_path: download_path.unwrap_or_else(|| PathBuf::from(".")),
             login: LoginComponent::new(),
             selector: SelectorComponent::new(),
             download: DownloadComponent::new(),
             theme: Theme::default(),
+            client,
             collect,
+            semaphore: Arc::new(Semaphore::new(MAX_HTTP_PERMITS)),
             action_tx,
             action_rx,
             authenticating: false,
@@ -128,11 +146,8 @@ impl App {
         match self.screen {
             Screen::Login => self.login.render(frame, area),
             Screen::Main => {
-                let [tab_area, content_area] = Layout::vertical([
-                    Constraint::Length(3),
-                    Constraint::Fill(1),
-                ])
-                .areas(area);
+                let [tab_area, content_area] =
+                    Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
 
                 self.render_tab_bar(frame, tab_area);
 
@@ -178,7 +193,6 @@ impl App {
             return;
         }
 
-        // Global: Quit
         if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL))
             || matches!(code, KeyCode::Esc | KeyCode::Char('q'))
         {
@@ -200,7 +214,6 @@ impl App {
                 }
             }
             Screen::Main => {
-                // Tab switching
                 if code == KeyCode::Tab {
                     let new_tab = match self.active_tab {
                         Tab::Selector => Tab::Download,
@@ -310,13 +323,10 @@ impl App {
                 self.try_enqueue_downloads();
             }
             AppAction::StartNextDownload => {
-                if let Some(page_key) = self.download.next_pending() {
-                    self.download.update_progress(&page_key, 0);
-                    self.start_simulated_download(page_key);
-                }
+                self.fill_download_slots();
             }
-            AppAction::DownloadProgress(page_key, progress) => {
-                self.download.update_progress(&page_key, progress);
+            AppAction::DownloadProgress(page_key, progress, ref phase) => {
+                self.download.update_progress(&page_key, progress, phase);
             }
             AppAction::DownloadCompleted(page_key) => {
                 self.download.mark_completed(&page_key);
@@ -336,10 +346,7 @@ impl App {
     }
 
     fn try_enqueue_downloads(&mut self) {
-        let (courses_to_fetch, lectures_to_fetch) =
-            self.selector.get_unfetched_for_selection();
-
-        // Start fetching any missing data
+        let (courses_to_fetch, lectures_to_fetch) = self.selector.get_unfetched_for_selection();
         let has_missing = !courses_to_fetch.is_empty() || !lectures_to_fetch.is_empty();
 
         for key in courses_to_fetch {
@@ -354,7 +361,6 @@ impl App {
             return;
         }
 
-        // All data is available — resolve and enqueue
         self.pending_enqueue = false;
         self.error = None;
         let resolved = self.selector.resolve_selected_pages();
@@ -363,9 +369,7 @@ impl App {
         }
         self.download.enqueue(resolved);
         self.active_tab = Tab::Download;
-        if !self.download.has_active_download() {
-            self.dispatch(AppAction::StartNextDownload);
-        }
+        self.fill_download_slots();
     }
 
     fn start_authentication(&self, credentials: Credentials) {
@@ -397,10 +401,10 @@ impl App {
         let year = self.year.and_then(|y| Year::new(y).ok());
 
         tokio::spawn(async move {
-            let action = match collect.get_courses(year).await {
-                Ok(courses) => AppAction::CoursesLoaded(courses),
-                Err(_) => AppAction::CoursesFailed("科目の取得に失敗しました".to_string()),
-            };
+            let action = collect.get_courses(year).await.map_or_else(
+                |_| AppAction::CoursesFailed("科目の取得に失敗しました".to_string()),
+                AppAction::CoursesLoaded,
+            );
             let _ = tx.send(action).await;
         });
     }
@@ -410,10 +414,10 @@ impl App {
         let tx = self.action_tx.clone();
 
         tokio::spawn(async move {
-            let action = match collect.get_lectures(&course_key).await {
-                Ok(lectures) => AppAction::LecturesLoaded(course_key, lectures),
-                Err(_) => AppAction::LecturesFailed("講義の取得に失敗しました".to_string()),
-            };
+            let action = collect.get_lectures(&course_key).await.map_or_else(
+                |_| AppAction::LecturesFailed("講義の取得に失敗しました".to_string()),
+                |lectures| AppAction::LecturesLoaded(course_key, lectures),
+            );
             let _ = tx.send(action).await;
         });
     }
@@ -423,29 +427,47 @@ impl App {
         let tx = self.action_tx.clone();
 
         tokio::spawn(async move {
-            let action = match collect.get_pages(&lecture_key).await {
-                Ok(pages) => AppAction::PagesLoaded(lecture_key, pages),
-                Err(_) => AppAction::PagesFailed("ページの取得に失敗しました".to_string()),
-            };
+            let action = collect.get_pages(&lecture_key).await.map_or_else(
+                |_| AppAction::PagesFailed("ページの取得に失敗しました".to_string()),
+                |pages| AppAction::PagesLoaded(lecture_key, pages),
+            );
             let _ = tx.send(action).await;
         });
     }
 
-    fn start_simulated_download(&self, page_key: PageKey) {
+    fn fill_download_slots(&mut self) {
+        while self.download.active_count() < MAX_CONCURRENT_DOWNLOADS {
+            if let Some(page_key) = self.download.next_pending() {
+                self.download.update_progress(&page_key, 0, "開始中...");
+                self.start_download(page_key);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn start_download(&self, page_key: PageKey) {
+        let collect = self.collect.clone();
+        let client = self.client.clone();
         let tx = self.action_tx.clone();
+        let download_path = self.download_path.clone();
+        let semaphore = self.semaphore.clone();
 
         tokio::spawn(async move {
-            let steps = [20u8, 45, 70, 90];
-            for progress in steps {
-                tokio::time::sleep(Duration::from_millis(800)).await;
-                let _ = tx
-                    .send(AppAction::DownloadProgress(page_key.clone(), progress))
-                    .await;
-            }
-            tokio::time::sleep(Duration::from_millis(800)).await;
-            let _ = tx
-                .send(AppAction::DownloadCompleted(page_key))
-                .await;
+            let result = crate::download::download_page(
+                &collect,
+                &client,
+                &page_key,
+                &download_path,
+                &tx,
+                &semaphore,
+            )
+            .await;
+            let action = match result {
+                Ok(()) => AppAction::DownloadCompleted(page_key),
+                Err(e) => AppAction::DownloadFailed(page_key, format!("{e:#}")),
+            };
+            let _ = tx.send(action).await;
         });
     }
 }
