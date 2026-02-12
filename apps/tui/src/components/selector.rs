@@ -9,6 +9,7 @@ use ratatui::{
 };
 use std::collections::{HashMap, HashSet};
 
+use super::download::ResolvedPage;
 use super::Component;
 use crate::ui::Theme;
 
@@ -24,7 +25,6 @@ pub enum Column {
 pub enum SelectorAction {
     FetchLectures(CourseKey),
     FetchPages(LectureKey),
-    SelectionChanged,
     Confirm,
 }
 
@@ -157,10 +157,6 @@ impl Component for SelectorComponent {
         None
     }
 
-    fn update(&mut self, action: Self::Action) -> Option<Self::Action> {
-        Some(action)
-    }
-
     fn render(&self, frame: &mut Frame, area: Rect) {
         let [course_area, lecture_area, page_area] = Layout::horizontal([
             Constraint::Ratio(1, 3),
@@ -189,12 +185,14 @@ impl SelectorComponent {
     }
 
     pub fn set_lectures(&mut self, lectures: Vec<Lecture>, for_course: &CourseKey) {
+        self.lectures_cache
+            .insert(for_course.clone(), lectures.clone());
+
         if self.focused_course_key.as_ref() != Some(for_course) {
             return;
         }
+
         self.loading_lectures = false;
-        self.lectures_cache
-            .insert(for_course.clone(), lectures.clone());
         self.lectures = lectures;
 
         if self.lectures.is_empty() {
@@ -216,12 +214,14 @@ impl SelectorComponent {
     }
 
     pub fn set_pages(&mut self, pages: Vec<LecturePage>, for_lecture: &LectureKey) {
+        self.pages_cache
+            .insert(for_lecture.clone(), pages.clone());
+
         if self.focused_lecture_key.as_ref() != Some(for_lecture) {
             return;
         }
+
         self.loading_pages = false;
-        self.pages_cache
-            .insert(for_lecture.clone(), pages.clone());
         self.pages = pages;
 
         if self.pages.is_empty() {
@@ -274,8 +274,8 @@ impl SelectorComponent {
                 self.move_column_right();
                 None
             }
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection_up(),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection_down(),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Char(' ') => self.toggle_selection(),
             KeyCode::Enter => Some(SelectorAction::Confirm),
             _ => None,
@@ -309,14 +309,6 @@ impl SelectorComponent {
         };
     }
 
-    fn move_selection_up(&mut self) -> Option<SelectorAction> {
-        self.move_selection(-1)
-    }
-
-    fn move_selection_down(&mut self) -> Option<SelectorAction> {
-        self.move_selection(1)
-    }
-
     fn move_selection(&mut self, delta: i32) -> Option<SelectorAction> {
         match self.current_column {
             Column::Course => {
@@ -339,8 +331,11 @@ impl SelectorComponent {
             return;
         }
         let current = state.selected().unwrap_or(0);
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
-        let next = (current as i32 + delta).rem_euclid(len as i32) as usize;
+        let next = if delta > 0 {
+            current.saturating_add(delta as usize).min(len - 1)
+        } else {
+            current.saturating_sub(delta.unsigned_abs() as usize)
+        };
         state.select(Some(next));
     }
 
@@ -434,7 +429,7 @@ impl SelectorComponent {
                         self.selection.deselect_all_lectures(&self.lectures);
                         self.selection.deselect_all_pages(&self.pages);
                     }
-                    return Some(SelectorAction::SelectionChanged);
+                    return None;
                 }
             }
             Column::Lecture => {
@@ -451,14 +446,14 @@ impl SelectorComponent {
                     } else {
                         self.selection.deselect_all_pages(&self.pages);
                     }
-                    return Some(SelectorAction::SelectionChanged);
+                    return None;
                 }
             }
             Column::Page => {
                 if let Some(page) = self.page_state.selected().and_then(|i| self.pages.get(i)) {
                     let key = page.key.clone();
                     self.selection.toggle_page(key);
-                    return Some(SelectorAction::SelectionChanged);
+                    return None;
                 }
             }
         }
@@ -547,7 +542,7 @@ impl SelectorComponent {
             .border_style(if focused {
                 self.theme.focused_border_style()
             } else {
-                self.theme.border_style()
+                self.theme.inactive_style()
             });
 
         let list = List::new(list_items)
@@ -560,6 +555,134 @@ impl SelectorComponent {
             .highlight_symbol("> ");
 
         frame.render_stateful_widget(list, area, &mut state.clone());
+    }
+
+    /// Returns (courses needing lectures, lectures needing pages) that are
+    /// selected but not yet cached.
+    pub fn get_unfetched_for_selection(&self) -> (Vec<CourseKey>, Vec<LectureKey>) {
+        let mut courses_to_fetch = Vec::new();
+        let mut lectures_to_fetch = Vec::new();
+
+        // Selected courses whose lectures haven't been fetched
+        for course_key in &self.selection.courses {
+            if let Some(lectures) = self.lectures_cache.get(course_key) {
+                // Lectures cached — check each for pages
+                for lecture in lectures {
+                    if !self.pages_cache.contains_key(&lecture.key) {
+                        lectures_to_fetch.push(lecture.key.clone());
+                    }
+                }
+            } else {
+                courses_to_fetch.push(course_key.clone());
+            }
+        }
+
+        // Individually selected lectures (not under a selected course) whose pages haven't been fetched
+        for lecture_key in &self.selection.lectures {
+            if self.selection.courses.contains(&lecture_key.course_key) {
+                continue; // Already handled above
+            }
+            if !self.pages_cache.contains_key(lecture_key) {
+                lectures_to_fetch.push(lecture_key.clone());
+            }
+        }
+
+        (courses_to_fetch, lectures_to_fetch)
+    }
+
+    /// Resolves all pages that should be downloaded based on the full selection
+    /// hierarchy: selected courses → all lectures → all pages, selected
+    /// lectures → all pages, and individually selected pages.
+    pub fn resolve_selected_pages(&self) -> Vec<ResolvedPage> {
+        let course_names: HashMap<&CourseKey, &str> = self
+            .courses
+            .iter()
+            .map(|c| (&c.key, c.display_name()))
+            .collect();
+
+        let lecture_names: HashMap<&LectureKey, &str> = self
+            .lectures_cache
+            .values()
+            .flat_map(|lectures| lectures.iter())
+            .map(|l| (&l.key, l.display_name()))
+            .collect();
+
+        let page_names: HashMap<&PageKey, &str> = self
+            .pages_cache
+            .values()
+            .flat_map(|pages| pages.iter())
+            .map(|p| (&p.key, p.display_name()))
+            .collect();
+
+        let mut seen = HashSet::new();
+        let mut resolved = Vec::new();
+
+        let mut add_page = |page_key: &PageKey| {
+            if !seen.insert(page_key.clone()) {
+                return;
+            }
+            let lecture_key = &page_key.lecture_key;
+            let course_key = &lecture_key.course_key;
+
+            resolved.push(ResolvedPage {
+                page_key: page_key.clone(),
+                course_name: course_names
+                    .get(course_key)
+                    .copied()
+                    .unwrap_or_else(|| course_key.slug.value())
+                    .to_string(),
+                lecture_name: lecture_names
+                    .get(lecture_key)
+                    .copied()
+                    .unwrap_or_else(|| lecture_key.slug.value())
+                    .to_string(),
+                page_name: page_names
+                    .get(page_key)
+                    .copied()
+                    .unwrap_or_else(|| page_key.slug.value())
+                    .to_string(),
+            });
+        };
+
+        // 1. Pages from selected courses (via cache)
+        for course_key in &self.selection.courses {
+            if let Some(lectures) = self.lectures_cache.get(course_key) {
+                for lecture in lectures {
+                    if let Some(pages) = self.pages_cache.get(&lecture.key) {
+                        for page in pages {
+                            add_page(&page.key);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Pages from individually selected lectures (not under selected course)
+        for lecture_key in &self.selection.lectures {
+            if self.selection.courses.contains(&lecture_key.course_key) {
+                continue;
+            }
+            if let Some(pages) = self.pages_cache.get(lecture_key) {
+                for page in pages {
+                    add_page(&page.key);
+                }
+            }
+        }
+
+        // 3. Individually selected pages
+        for page_key in &self.selection.pages {
+            if self.selection.lectures.contains(&page_key.lecture_key)
+                || self
+                    .selection
+                    .courses
+                    .contains(&page_key.lecture_key.course_key)
+            {
+                continue;
+            }
+            add_page(page_key);
+        }
+
+        resolved
     }
 
     pub fn request_initial_data(&mut self) -> Option<SelectorAction> {

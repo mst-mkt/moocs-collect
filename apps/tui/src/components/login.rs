@@ -13,7 +13,6 @@ use crate::ui::Theme;
 #[derive(Debug, Clone)]
 pub enum LoginAction {
     Submit(Credentials),
-    SwitchField,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,7 +27,6 @@ pub struct LoginComponent {
     password_input: Input,
     current_field: InputField,
     theme: Theme,
-    loading: bool,
 }
 
 impl Component for LoginComponent {
@@ -38,9 +36,8 @@ impl Component for LoginComponent {
         Self {
             username_input: Input::default(),
             password_input: Input::default(),
-            current_field: InputField::Username,
+            current_field: InputField::default(),
             theme: Theme::default(),
-            loading: false,
         }
     }
 
@@ -49,22 +46,6 @@ impl Component for LoginComponent {
             return self.handle_key_event(key);
         }
         None
-    }
-
-    fn update(&mut self, action: Self::Action) -> Option<Self::Action> {
-        match action {
-            LoginAction::SwitchField => {
-                self.current_field = match self.current_field {
-                    InputField::Username => InputField::Password,
-                    InputField::Password => InputField::Username,
-                };
-                None
-            }
-            LoginAction::Submit(credentials) => {
-                self.password_input.reset();
-                Some(LoginAction::Submit(credentials))
-            }
-        }
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
@@ -106,7 +87,7 @@ impl Component for LoginComponent {
                 .border_style(if username_focused {
                     self.theme.focused_border_style()
                 } else {
-                    self.theme.border_style()
+                    self.theme.inactive_style()
                 }),
         );
         frame.render_widget(username, username_area);
@@ -121,7 +102,7 @@ impl Component for LoginComponent {
                 .border_style(if password_focused {
                     self.theme.focused_border_style()
                 } else {
-                    self.theme.border_style()
+                    self.theme.inactive_style()
                 }),
         );
         frame.render_widget(password, password_area);
@@ -150,13 +131,15 @@ impl Component for LoginComponent {
 }
 
 impl LoginComponent {
-    pub const fn set_loading(&mut self, loading: bool) {
-        self.loading = loading;
-    }
-
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<LoginAction> {
         match key.code {
-            KeyCode::Tab => Some(LoginAction::SwitchField),
+            KeyCode::Tab => {
+                self.current_field = match self.current_field {
+                    InputField::Username => InputField::Password,
+                    InputField::Password => InputField::Username,
+                };
+                None
+            }
             KeyCode::Enter => {
                 let username = self.username_input.value().trim().to_string();
                 let password = self.password_input.value().to_string();

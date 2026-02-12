@@ -6,44 +6,6 @@ use ratatui::{
 
 use super::theme::Theme;
 
-#[allow(dead_code)] // For future expansion
-pub struct PopupConfig<'a> {
-    pub title: Option<&'a str>,
-    pub message: &'a str,
-    pub width: u16,
-    pub height: u16,
-    pub wrap: bool,
-}
-
-#[allow(dead_code)] // For future expansion
-impl<'a> PopupConfig<'a> {
-    pub const fn new(message: &'a str) -> Self {
-        Self {
-            title: None,
-            message,
-            width: 40,
-            height: 5,
-            wrap: false,
-        }
-    }
-
-    pub const fn with_title(mut self, title: &'a str) -> Self {
-        self.title = Some(title);
-        self
-    }
-
-    pub const fn with_size(mut self, width: u16, height: u16) -> Self {
-        self.width = width;
-        self.height = height;
-        self
-    }
-
-    pub const fn with_wrap(mut self) -> Self {
-        self.wrap = true;
-        self
-    }
-}
-
 fn centered_popup(area: Rect, width: u16, height: u16) -> Rect {
     let [_, center_v, _] = Layout::vertical([
         Constraint::Fill(1),

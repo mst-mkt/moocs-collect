@@ -35,5 +35,5 @@ async fn main() -> Result<()> {
     let year = matches.get_one::<u32>("year").copied();
 
     let mut app = App::new(download_path, year);
-    app.run().await
+    app.run()
 }

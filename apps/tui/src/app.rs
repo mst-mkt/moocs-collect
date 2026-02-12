@@ -1,12 +1,18 @@
-use collect::{Collect, Course, CourseKey, Credentials, Lecture, LectureKey, LecturePage, Year};
+use collect::{Collect, Course, CourseKey, Credentials, Lecture, LectureKey, LecturePage, PageKey, Year};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::Frame;
+use ratatui::{
+    layout::{Constraint, Layout, Rect},
+    text::Line,
+    widgets::{Block, Borders, Tabs},
+    Frame,
+};
 use std::{path::PathBuf, time::Duration};
 use tokio::sync::mpsc;
 
 use crate::components::{
-    login::LoginAction, selector::SelectorAction, Component, LoginComponent, SelectorComponent,
+    login::LoginAction, selector::SelectorAction, Component, DownloadComponent, LoginComponent,
+    SelectorComponent,
 };
 use crate::ui::{self, terminal, Theme, Tui};
 
@@ -14,11 +20,17 @@ use crate::ui::{self, terminal, Theme, Tui};
 pub enum Screen {
     #[default]
     Login,
+    Main,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
     Selector,
+    Download,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum AppAction {
     Login(Credentials),
     LoginSuccess,
@@ -32,62 +44,59 @@ pub enum AppAction {
     FetchPages(LectureKey),
     PagesLoaded(LectureKey, Vec<LecturePage>),
     PagesFailed(String),
-    Navigate(Screen),
-    ShowError(String),
+    SwitchTab(Tab),
+    EnqueueDownloads,
+    StartNextDownload,
+    DownloadProgress(PageKey, u8),
+    DownloadCompleted(PageKey),
+    DownloadFailed(PageKey, String),
     ClearError,
     Quit,
 }
 
-#[derive(Debug)]
-enum AsyncResult {
-    AuthSuccess,
-    AuthFailed(String),
-    Courses(Vec<Course>),
-    CoursesFailed(String),
-    Lectures(CourseKey, Vec<Lecture>),
-    LecturesFailed(String),
-    Pages(LectureKey, Vec<LecturePage>),
-    PagesFailed(String),
-}
-
 pub struct App {
     screen: Screen,
+    active_tab: Tab,
     error: Option<String>,
     running: bool,
     year: Option<u32>,
     login: LoginComponent,
     selector: SelectorComponent,
+    download: DownloadComponent,
     theme: Theme,
     collect: Collect,
-    async_tx: mpsc::Sender<AsyncResult>,
-    async_rx: mpsc::Receiver<AsyncResult>,
+    action_tx: mpsc::Sender<AppAction>,
+    action_rx: mpsc::Receiver<AppAction>,
     authenticating: bool,
     loading_courses: bool,
+    pending_enqueue: bool,
 }
 
 impl App {
     pub fn new(_download_path: Option<PathBuf>, year: Option<u32>) -> Self {
-        let (async_tx, async_rx) = mpsc::channel(4);
+        let (action_tx, action_rx) = mpsc::channel(32);
         let collect = Collect::default();
 
         Self {
             screen: Screen::default(),
+            active_tab: Tab::default(),
             error: None,
             running: true,
             year,
             login: LoginComponent::new(),
             selector: SelectorComponent::new(),
+            download: DownloadComponent::new(),
             theme: Theme::default(),
             collect,
-            async_tx,
-            async_rx,
+            action_tx,
+            action_rx,
             authenticating: false,
             loading_courses: false,
+            pending_enqueue: false,
         }
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn run(&mut self) -> Result<()> {
+    pub fn run(&mut self) -> Result<()> {
         let mut terminal = terminal::setup()?;
         let result = self.main_loop(&mut terminal);
         terminal::restore()?;
@@ -98,39 +107,8 @@ impl App {
         while self.running {
             terminal.draw(|frame| self.render(frame))?;
 
-            while let Ok(result) = self.async_rx.try_recv() {
-                match result {
-                    AsyncResult::AuthSuccess => {
-                        self.authenticating = false;
-                        self.login.set_loading(false);
-                        self.dispatch(AppAction::LoginSuccess);
-                    }
-                    AsyncResult::AuthFailed(msg) => {
-                        self.authenticating = false;
-                        self.login.set_loading(false);
-                        self.dispatch(AppAction::LoginFailed(msg));
-                    }
-                    AsyncResult::Courses(courses) => {
-                        self.loading_courses = false;
-                        self.dispatch(AppAction::CoursesLoaded(courses));
-                    }
-                    AsyncResult::CoursesFailed(msg) => {
-                        self.loading_courses = false;
-                        self.dispatch(AppAction::CoursesFailed(msg));
-                    }
-                    AsyncResult::Lectures(course_key, lectures) => {
-                        self.dispatch(AppAction::LecturesLoaded(course_key, lectures));
-                    }
-                    AsyncResult::LecturesFailed(msg) => {
-                        self.dispatch(AppAction::LecturesFailed(msg));
-                    }
-                    AsyncResult::Pages(lecture_key, pages) => {
-                        self.dispatch(AppAction::PagesLoaded(lecture_key, pages));
-                    }
-                    AsyncResult::PagesFailed(msg) => {
-                        self.dispatch(AppAction::PagesFailed(msg));
-                    }
-                }
+            while let Ok(action) = self.action_rx.try_recv() {
+                self.dispatch(action);
             }
 
             if event::poll(Duration::from_millis(50))? {
@@ -149,7 +127,20 @@ impl App {
 
         match self.screen {
             Screen::Login => self.login.render(frame, area),
-            Screen::Selector => self.selector.render(frame, area),
+            Screen::Main => {
+                let [tab_area, content_area] = Layout::vertical([
+                    Constraint::Length(3),
+                    Constraint::Fill(1),
+                ])
+                .areas(area);
+
+                self.render_tab_bar(frame, tab_area);
+
+                match self.active_tab {
+                    Tab::Selector => self.selector.render(frame, content_area),
+                    Tab::Download => self.download.render(frame, content_area),
+                }
+            }
         }
 
         if self.authenticating {
@@ -165,8 +156,24 @@ impl App {
         }
     }
 
+    fn render_tab_bar(&self, frame: &mut Frame, area: Rect) {
+        let titles = vec![Line::from(" 選択 "), Line::from(" ダウンロード ")];
+        let selected = match self.active_tab {
+            Tab::Selector => 0,
+            Tab::Download => 1,
+        };
+
+        let tabs = Tabs::new(titles)
+            .block(Block::default().borders(Borders::BOTTOM))
+            .select(selected)
+            .style(self.theme.inactive_style())
+            .highlight_style(self.theme.title_style())
+            .divider("|");
+
+        frame.render_widget(tabs, area);
+    }
+
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        // Block input during authentication
         if self.authenticating {
             return;
         }
@@ -183,34 +190,49 @@ impl App {
             return;
         }
 
-        // Screen-specific
         match self.screen {
             Screen::Login => {
-                if let Some(action) = self
+                if let Some(LoginAction::Submit(creds)) = self
                     .login
                     .handle_event(Event::Key(event::KeyEvent::new(code, modifiers)))
                 {
-                    match action {
-                        LoginAction::Submit(creds) => self.dispatch(AppAction::Login(creds)),
-                        LoginAction::SwitchField => {
-                            self.login.update(action);
-                        }
-                    }
+                    self.dispatch(AppAction::Login(creds));
                 }
             }
-            Screen::Selector => {
-                if let Some(action) = self
-                    .selector
-                    .handle_event(Event::Key(event::KeyEvent::new(code, modifiers)))
-                {
-                    match action {
-                        SelectorAction::FetchLectures(key) => {
-                            self.dispatch(AppAction::FetchLectures(key));
+            Screen::Main => {
+                // Tab switching
+                if code == KeyCode::Tab {
+                    let new_tab = match self.active_tab {
+                        Tab::Selector => Tab::Download,
+                        Tab::Download => Tab::Selector,
+                    };
+                    self.dispatch(AppAction::SwitchTab(new_tab));
+                    return;
+                }
+
+                match self.active_tab {
+                    Tab::Selector => {
+                        if let Some(action) = self
+                            .selector
+                            .handle_event(Event::Key(event::KeyEvent::new(code, modifiers)))
+                        {
+                            match action {
+                                SelectorAction::FetchLectures(key) => {
+                                    self.dispatch(AppAction::FetchLectures(key));
+                                }
+                                SelectorAction::FetchPages(key) => {
+                                    self.dispatch(AppAction::FetchPages(key));
+                                }
+                                SelectorAction::Confirm => {
+                                    self.dispatch(AppAction::EnqueueDownloads);
+                                }
+                            }
                         }
-                        SelectorAction::FetchPages(key) => {
-                            self.dispatch(AppAction::FetchPages(key));
-                        }
-                        SelectorAction::SelectionChanged | SelectorAction::Confirm => {}
+                    }
+                    Tab::Download => {
+                        let _ = self
+                            .download
+                            .handle_event(Event::Key(event::KeyEvent::new(code, modifiers)));
                     }
                 }
             }
@@ -221,27 +243,34 @@ impl App {
         match action {
             AppAction::Login(creds) => {
                 self.authenticating = true;
-                self.login.set_loading(true);
                 self.error = None;
                 self.start_authentication(creds);
             }
             AppAction::LoginSuccess => {
+                self.authenticating = false;
                 self.error = None;
-                self.screen = Screen::Selector;
+                self.screen = Screen::Main;
                 self.dispatch(AppAction::FetchCourses);
             }
-            AppAction::LoginFailed(msg)
-            | AppAction::ShowError(msg)
-            | AppAction::CoursesFailed(msg)
-            | AppAction::LecturesFailed(msg)
-            | AppAction::PagesFailed(msg) => {
+            AppAction::LoginFailed(msg) => {
+                self.authenticating = false;
                 self.error = Some(msg);
+            }
+            AppAction::CoursesFailed(msg) => {
+                self.loading_courses = false;
+                self.error = Some(msg);
+            }
+            AppAction::LecturesFailed(msg) | AppAction::PagesFailed(msg) => {
+                if !self.pending_enqueue && self.active_tab == Tab::Selector {
+                    self.error = Some(msg);
+                }
             }
             AppAction::FetchCourses => {
                 self.loading_courses = true;
                 self.start_fetch_courses();
             }
             AppAction::CoursesLoaded(courses) => {
+                self.loading_courses = false;
                 self.selector.set_courses(courses);
                 if let Some(SelectorAction::FetchLectures(key)) =
                     self.selector.request_initial_data()
@@ -260,6 +289,9 @@ impl App {
                         self.dispatch(AppAction::FetchPages(key));
                     }
                 }
+                if self.pending_enqueue {
+                    self.try_enqueue_downloads();
+                }
             }
             AppAction::FetchPages(key) => {
                 self.selector.set_loading_pages(true);
@@ -267,9 +299,32 @@ impl App {
             }
             AppAction::PagesLoaded(lecture_key, pages) => {
                 self.selector.set_pages(pages, &lecture_key);
+                if self.pending_enqueue {
+                    self.try_enqueue_downloads();
+                }
             }
-            AppAction::Navigate(screen) => {
-                self.screen = screen;
+            AppAction::SwitchTab(tab) => {
+                self.active_tab = tab;
+            }
+            AppAction::EnqueueDownloads => {
+                self.try_enqueue_downloads();
+            }
+            AppAction::StartNextDownload => {
+                if let Some(page_key) = self.download.next_pending() {
+                    self.download.update_progress(&page_key, 0);
+                    self.start_simulated_download(page_key);
+                }
+            }
+            AppAction::DownloadProgress(page_key, progress) => {
+                self.download.update_progress(&page_key, progress);
+            }
+            AppAction::DownloadCompleted(page_key) => {
+                self.download.mark_completed(&page_key);
+                self.dispatch(AppAction::StartNextDownload);
+            }
+            AppAction::DownloadFailed(page_key, msg) => {
+                self.download.mark_failed(&page_key, msg);
+                self.dispatch(AppAction::StartNextDownload);
             }
             AppAction::ClearError => {
                 self.error = None;
@@ -280,14 +335,47 @@ impl App {
         }
     }
 
+    fn try_enqueue_downloads(&mut self) {
+        let (courses_to_fetch, lectures_to_fetch) =
+            self.selector.get_unfetched_for_selection();
+
+        // Start fetching any missing data
+        let has_missing = !courses_to_fetch.is_empty() || !lectures_to_fetch.is_empty();
+
+        for key in courses_to_fetch {
+            self.start_fetch_lectures(key);
+        }
+        for key in lectures_to_fetch {
+            self.start_fetch_pages(key);
+        }
+
+        if has_missing {
+            self.pending_enqueue = true;
+            return;
+        }
+
+        // All data is available — resolve and enqueue
+        self.pending_enqueue = false;
+        self.error = None;
+        let resolved = self.selector.resolve_selected_pages();
+        if resolved.is_empty() {
+            return;
+        }
+        self.download.enqueue(resolved);
+        self.active_tab = Tab::Download;
+        if !self.download.has_active_download() {
+            self.dispatch(AppAction::StartNextDownload);
+        }
+    }
+
     fn start_authentication(&self, credentials: Credentials) {
         let collect = self.collect.clone();
-        let tx = self.async_tx.clone();
+        let tx = self.action_tx.clone();
 
         tokio::spawn(async move {
             let result = collect.authenticate(&credentials).await;
-            let async_result = match result {
-                Ok(()) => AsyncResult::AuthSuccess,
+            let action = match result {
+                Ok(()) => AppAction::LoginSuccess,
                 Err(e) => {
                     let msg = match e {
                         collect::error::CollectError::Authentication { reason } => {
@@ -296,53 +384,68 @@ impl App {
                         _ => "ログインに失敗しました。ユーザー名とパスワードを確認してください"
                             .to_string(),
                     };
-                    AsyncResult::AuthFailed(msg)
+                    AppAction::LoginFailed(msg)
                 }
             };
-            let _ = tx.send(async_result).await;
+            let _ = tx.send(action).await;
         });
     }
 
     fn start_fetch_courses(&self) {
         let collect = self.collect.clone();
-        let tx = self.async_tx.clone();
+        let tx = self.action_tx.clone();
         let year = self.year.and_then(|y| Year::new(y).ok());
 
         tokio::spawn(async move {
-            let result = collect.get_courses(year).await;
-            let async_result = match result {
-                Ok(courses) => AsyncResult::Courses(courses),
-                Err(_) => AsyncResult::CoursesFailed("科目の取得に失敗しました".to_string()),
+            let action = match collect.get_courses(year).await {
+                Ok(courses) => AppAction::CoursesLoaded(courses),
+                Err(_) => AppAction::CoursesFailed("科目の取得に失敗しました".to_string()),
             };
-            let _ = tx.send(async_result).await;
+            let _ = tx.send(action).await;
         });
     }
 
     fn start_fetch_lectures(&self, course_key: CourseKey) {
         let collect = self.collect.clone();
-        let tx = self.async_tx.clone();
+        let tx = self.action_tx.clone();
 
         tokio::spawn(async move {
-            let result = collect.get_lectures(&course_key).await;
-            let async_result = match result {
-                Ok(lectures) => AsyncResult::Lectures(course_key, lectures),
-                Err(_) => AsyncResult::LecturesFailed("講義の取得に失敗しました".to_string()),
+            let action = match collect.get_lectures(&course_key).await {
+                Ok(lectures) => AppAction::LecturesLoaded(course_key, lectures),
+                Err(_) => AppAction::LecturesFailed("講義の取得に失敗しました".to_string()),
             };
-            let _ = tx.send(async_result).await;
+            let _ = tx.send(action).await;
         });
     }
 
     fn start_fetch_pages(&self, lecture_key: LectureKey) {
         let collect = self.collect.clone();
-        let tx = self.async_tx.clone();
+        let tx = self.action_tx.clone();
 
         tokio::spawn(async move {
-            let result = collect.get_pages(&lecture_key).await;
-            let async_result = match result {
-                Ok(pages) => AsyncResult::Pages(lecture_key, pages),
-                Err(_) => AsyncResult::PagesFailed("ページの取得に失敗しました".to_string()),
+            let action = match collect.get_pages(&lecture_key).await {
+                Ok(pages) => AppAction::PagesLoaded(lecture_key, pages),
+                Err(_) => AppAction::PagesFailed("ページの取得に失敗しました".to_string()),
             };
-            let _ = tx.send(async_result).await;
+            let _ = tx.send(action).await;
+        });
+    }
+
+    fn start_simulated_download(&self, page_key: PageKey) {
+        let tx = self.action_tx.clone();
+
+        tokio::spawn(async move {
+            let steps = [20u8, 45, 70, 90];
+            for progress in steps {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                let _ = tx
+                    .send(AppAction::DownloadProgress(page_key.clone(), progress))
+                    .await;
+            }
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let _ = tx
+                .send(AppAction::DownloadCompleted(page_key))
+                .await;
         });
     }
 }
