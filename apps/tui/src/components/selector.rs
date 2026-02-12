@@ -21,6 +21,50 @@ pub enum Column {
     Page,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Unchecked,
+    Checked,
+    Indeterminate,
+}
+
+impl CheckState {
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Unchecked => "[ ] ",
+            Self::Checked => "[x] ",
+            Self::Indeterminate => "[-] ",
+        }
+    }
+
+    /// Compute aggregate check state from child states.
+    fn aggregate(children: impl Iterator<Item = Self>) -> Self {
+        let mut all_checked = true;
+        let mut any_selected = false;
+        let mut has_children = false;
+
+        for state in children {
+            has_children = true;
+            match state {
+                Self::Checked => any_selected = true,
+                Self::Indeterminate => {
+                    any_selected = true;
+                    all_checked = false;
+                }
+                Self::Unchecked => all_checked = false,
+            }
+        }
+
+        if !has_children || !any_selected {
+            Self::Unchecked
+        } else if all_checked {
+            Self::Checked
+        } else {
+            Self::Indeterminate
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum SelectorAction {
     FetchLectures(CourseKey),
@@ -48,26 +92,6 @@ impl SelectionState {
         self.pages.contains(key)
     }
 
-    pub fn toggle_course(&mut self, key: CourseKey) -> bool {
-        if self.courses.contains(&key) {
-            self.courses.remove(&key);
-            false
-        } else {
-            self.courses.insert(key);
-            true
-        }
-    }
-
-    pub fn toggle_lecture(&mut self, key: LectureKey) -> bool {
-        if self.lectures.contains(&key) {
-            self.lectures.remove(&key);
-            false
-        } else {
-            self.lectures.insert(key);
-            true
-        }
-    }
-
     pub fn toggle_page(&mut self, key: PageKey) -> bool {
         if self.pages.contains(&key) {
             self.pages.remove(&key);
@@ -84,22 +108,89 @@ impl SelectionState {
         }
     }
 
-    pub fn deselect_all_lectures(&mut self, lectures: &[Lecture]) {
-        for lecture in lectures {
-            self.lectures.remove(&lecture.key);
-        }
-    }
-
     pub fn select_all_pages(&mut self, pages: &[LecturePage]) {
         for page in pages {
             self.pages.insert(page.key.clone());
         }
     }
 
-    pub fn deselect_all_pages(&mut self, pages: &[LecturePage]) {
-        for page in pages {
-            self.pages.remove(&page.key);
+    /// Deselect a course and all its cached lectures/pages
+    pub fn deselect_course_cascade(
+        &mut self,
+        course_key: &CourseKey,
+        lectures_cache: &HashMap<CourseKey, Vec<Lecture>>,
+        pages_cache: &HashMap<LectureKey, Vec<LecturePage>>,
+    ) {
+        self.courses.remove(course_key);
+        if let Some(lectures) = lectures_cache.get(course_key) {
+            for lecture in lectures {
+                self.lectures.remove(&lecture.key);
+                if let Some(pages) = pages_cache.get(&lecture.key) {
+                    for page in pages {
+                        self.pages.remove(&page.key);
+                    }
+                }
+            }
         }
+    }
+
+    /// Deselect a lecture and all its cached pages
+    pub fn deselect_lecture_cascade(
+        &mut self,
+        lecture_key: &LectureKey,
+        pages_cache: &HashMap<LectureKey, Vec<LecturePage>>,
+    ) {
+        self.lectures.remove(lecture_key);
+        if let Some(pages) = pages_cache.get(lecture_key) {
+            for page in pages {
+                self.pages.remove(&page.key);
+            }
+        }
+    }
+
+    /// Get the check state for a course based on its children
+    pub fn get_course_check_state(
+        &self,
+        course_key: &CourseKey,
+        lectures_cache: &HashMap<CourseKey, Vec<Lecture>>,
+        pages_cache: &HashMap<LectureKey, Vec<LecturePage>>,
+    ) -> CheckState {
+        if self.courses.contains(course_key) {
+            return CheckState::Checked;
+        }
+
+        let Some(lectures) = lectures_cache.get(course_key) else {
+            return CheckState::Unchecked;
+        };
+
+        CheckState::aggregate(
+            lectures
+                .iter()
+                .map(|l| self.get_lecture_check_state(&l.key, pages_cache)),
+        )
+    }
+
+    /// Get the check state for a lecture based on its children
+    pub fn get_lecture_check_state(
+        &self,
+        lecture_key: &LectureKey,
+        pages_cache: &HashMap<LectureKey, Vec<LecturePage>>,
+    ) -> CheckState {
+        if self.lectures.contains(lecture_key) {
+            return CheckState::Checked;
+        }
+
+        let Some(pages) = pages_cache.get(lecture_key) else {
+            return CheckState::Unchecked;
+        };
+
+        CheckState::aggregate(pages.iter().map(|p| {
+            if self.pages.contains(&p.key) {
+                CheckState::Checked
+            } else {
+                CheckState::Unchecked
+            }
+        }))
     }
 }
 
@@ -248,19 +339,53 @@ impl SelectorComponent {
         self.focused_lecture_key.clone()
     }
 
-    pub fn try_load_pages_from_cache(&mut self) -> bool {
-        if let Some(key) = &self.focused_lecture_key {
-            if let Some(cached) = self.pages_cache.get(key) {
-                self.pages = cached.clone();
-                if self.pages.is_empty() {
-                    self.page_state.select(None);
-                } else {
-                    self.page_state.select(Some(0));
-                }
-                return true;
-            }
+    fn try_load_lectures_from_cache(&mut self) -> bool {
+        let Some(key) = self.focused_course_key.clone() else {
+            return false;
+        };
+        let Some(cached) = self.lectures_cache.get(&key).cloned() else {
+            return false;
+        };
+
+        self.loading_lectures = false;
+        self.lectures = cached;
+
+        if self.selection.is_course_selected(&key) {
+            self.selection.select_all_lectures(&self.lectures);
         }
-        false
+
+        if self.lectures.is_empty() {
+            self.lecture_state.select(None);
+        } else {
+            self.lecture_state.select(Some(0));
+            self.focused_lecture_key = self.lectures.first().map(|l| l.key.clone());
+        }
+        true
+    }
+
+    pub fn try_load_pages_from_cache(&mut self) -> bool {
+        let Some(key) = self.focused_lecture_key.clone() else {
+            return false;
+        };
+        let Some(cached) = self.pages_cache.get(&key).cloned() else {
+            return false;
+        };
+
+        self.loading_pages = false;
+        self.pages = cached;
+
+        let should_select = self.selection.is_lecture_selected(&key)
+            || self.selection.is_course_selected(&key.course_key);
+        if should_select {
+            self.selection.select_all_pages(&self.pages);
+        }
+
+        if self.pages.is_empty() {
+            self.page_state.select(None);
+        } else {
+            self.page_state.select(Some(0));
+        }
+        true
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<SelectorAction> {
@@ -345,38 +470,35 @@ impl SelectorComponent {
             .and_then(|i| self.courses.get(i))
             .map(|c| c.key.clone());
 
-        if new_key != self.focused_course_key {
-            self.focused_course_key.clone_from(&new_key);
-            self.pages.clear();
-            self.page_state.select(None);
-            self.focused_lecture_key = None;
+        if new_key == self.focused_course_key {
+            return None;
+        }
 
-            if let Some(key) = new_key {
-                if let Some(cached) = self.lectures_cache.get(&key) {
-                    self.lectures = cached.clone();
-                    if self.lectures.is_empty() {
-                        self.lecture_state.select(None);
-                    } else {
-                        self.lecture_state.select(Some(0));
-                        self.focused_lecture_key = self.lectures.first().map(|l| l.key.clone());
-                        if !self.try_load_pages_from_cache() {
-                            if let Some(page_key) = self.focused_lecture_key.clone() {
-                                self.loading_pages = true;
-                                return Some(SelectorAction::FetchPages(page_key));
-                            }
-                        }
-                    }
-                    return None;
-                }
-                self.lectures.clear();
-                self.lecture_state.select(None);
-                self.loading_lectures = true;
-                return Some(SelectorAction::FetchLectures(key));
-            }
+        self.focused_course_key.clone_from(&new_key);
+        self.pages.clear();
+        self.page_state.select(None);
+        self.focused_lecture_key = None;
+
+        let Some(key) = new_key else {
             self.lectures.clear();
             self.lecture_state.select(None);
+            return None;
+        };
+
+        if self.try_load_lectures_from_cache() {
+            if !self.try_load_pages_from_cache() {
+                if let Some(lecture_key) = self.focused_lecture_key.clone() {
+                    self.loading_pages = true;
+                    return Some(SelectorAction::FetchPages(lecture_key));
+                }
+            }
+            return None;
         }
-        None
+
+        self.lectures.clear();
+        self.lecture_state.select(None);
+        self.loading_lectures = true;
+        Some(SelectorAction::FetchLectures(key))
     }
 
     fn on_lecture_focus_changed(&mut self) -> Option<SelectorAction> {
@@ -386,28 +508,26 @@ impl SelectorComponent {
             .and_then(|i| self.lectures.get(i))
             .map(|l| l.key.clone());
 
-        if new_key != self.focused_lecture_key {
-            self.focused_lecture_key.clone_from(&new_key);
+        if new_key == self.focused_lecture_key {
+            return None;
+        }
 
-            if let Some(key) = new_key {
-                if let Some(cached) = self.pages_cache.get(&key) {
-                    self.pages = cached.clone();
-                    if self.pages.is_empty() {
-                        self.page_state.select(None);
-                    } else {
-                        self.page_state.select(Some(0));
-                    }
-                    return None;
-                }
-                self.pages.clear();
-                self.page_state.select(None);
-                self.loading_pages = true;
-                return Some(SelectorAction::FetchPages(key));
-            }
+        self.focused_lecture_key.clone_from(&new_key);
+
+        let Some(key) = new_key else {
             self.pages.clear();
             self.page_state.select(None);
+            return None;
+        };
+
+        if self.try_load_pages_from_cache() {
+            return None;
         }
-        None
+
+        self.pages.clear();
+        self.page_state.select(None);
+        self.loading_pages = true;
+        Some(SelectorAction::FetchPages(key))
     }
 
     fn toggle_selection(&mut self) -> Option<SelectorAction> {
@@ -419,14 +539,27 @@ impl SelectorComponent {
                     .and_then(|i| self.courses.get(i))
                 {
                     let key = course.key.clone();
-                    let selected = self.selection.toggle_course(key);
+                    let current_state = self.selection.get_course_check_state(
+                        &key,
+                        &self.lectures_cache,
+                        &self.pages_cache,
+                    );
 
-                    if selected {
-                        self.selection.select_all_lectures(&self.lectures);
-                        self.selection.select_all_pages(&self.pages);
-                    } else {
-                        self.selection.deselect_all_lectures(&self.lectures);
-                        self.selection.deselect_all_pages(&self.pages);
+                    match current_state {
+                        CheckState::Checked => {
+                            // Deselect course and all children
+                            self.selection.deselect_course_cascade(
+                                &key,
+                                &self.lectures_cache,
+                                &self.pages_cache,
+                            );
+                        }
+                        CheckState::Unchecked | CheckState::Indeterminate => {
+                            // Select course and all visible children
+                            self.selection.courses.insert(key);
+                            self.selection.select_all_lectures(&self.lectures);
+                            self.selection.select_all_pages(&self.pages);
+                        }
                     }
                     return None;
                 }
@@ -438,12 +571,24 @@ impl SelectorComponent {
                     .and_then(|i| self.lectures.get(i))
                 {
                     let key = lecture.key.clone();
-                    let selected = self.selection.toggle_lecture(key);
+                    let current_state = self
+                        .selection
+                        .get_lecture_check_state(&key, &self.pages_cache);
 
-                    if selected {
-                        self.selection.select_all_pages(&self.pages);
-                    } else {
-                        self.selection.deselect_all_pages(&self.pages);
+                    // Remove parent course from selection (becomes indeterminate)
+                    self.selection.courses.remove(&key.course_key);
+
+                    match current_state {
+                        CheckState::Checked => {
+                            // Deselect lecture and all children
+                            self.selection
+                                .deselect_lecture_cascade(&key, &self.pages_cache);
+                        }
+                        CheckState::Unchecked | CheckState::Indeterminate => {
+                            // Select lecture and all visible pages
+                            self.selection.lectures.insert(key);
+                            self.selection.select_all_pages(&self.pages);
+                        }
                     }
                     return None;
                 }
@@ -451,6 +596,11 @@ impl SelectorComponent {
             Column::Page => {
                 if let Some(page) = self.page_state.selected().and_then(|i| self.pages.get(i)) {
                     let key = page.key.clone();
+
+                    // Remove parent lecture and course from selection (becomes indeterminate)
+                    self.selection.lectures.remove(&key.lecture_key);
+                    self.selection.courses.remove(&key.lecture_key.course_key);
+
                     self.selection.toggle_page(key);
                     return None;
                 }
@@ -464,7 +614,14 @@ impl SelectorComponent {
         let items: Vec<_> = self
             .courses
             .iter()
-            .map(|c| (self.selection.is_course_selected(&c.key), c.display_name()))
+            .map(|c| {
+                let state = self.selection.get_course_check_state(
+                    &c.key,
+                    &self.lectures_cache,
+                    &self.pages_cache,
+                );
+                (state, c.display_name())
+            })
             .collect();
         self.render_list(
             frame,
@@ -485,7 +642,12 @@ impl SelectorComponent {
         let items: Vec<_> = self
             .lectures
             .iter()
-            .map(|l| (self.selection.is_lecture_selected(&l.key), l.display_name()))
+            .map(|l| {
+                let state = self
+                    .selection
+                    .get_lecture_check_state(&l.key, &self.pages_cache);
+                (state, l.display_name())
+            })
             .collect();
         self.render_list(
             frame,
@@ -506,7 +668,14 @@ impl SelectorComponent {
         let items: Vec<_> = self
             .pages
             .iter()
-            .map(|p| (self.selection.is_page_selected(&p.key), p.display_name()))
+            .map(|p| {
+                let state = if self.selection.is_page_selected(&p.key) {
+                    CheckState::Checked
+                } else {
+                    CheckState::Unchecked
+                };
+                (state, p.display_name())
+            })
             .collect();
         self.render_list(
             frame,
@@ -523,14 +692,14 @@ impl SelectorComponent {
         frame: &mut Frame,
         area: Rect,
         title: &str,
-        items: &[(bool, &str)],
+        items: &[(CheckState, &str)],
         state: &ListState,
         focused: bool,
     ) {
         let list_items: Vec<ListItem> = items
             .iter()
-            .map(|(selected, name)| {
-                let checkbox = if *selected { "[x] " } else { "[ ] " };
+            .map(|(check_state, name)| {
+                let checkbox = check_state.symbol();
                 ListItem::new(Line::from(vec![Span::raw(checkbox), Span::raw(*name)]))
             })
             .collect();
