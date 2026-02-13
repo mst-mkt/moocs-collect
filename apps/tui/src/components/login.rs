@@ -26,20 +26,10 @@ pub struct LoginComponent {
     username_input: Input,
     password_input: Input,
     current_field: InputField,
-    theme: Theme,
 }
 
 impl Component for LoginComponent {
     type Action = LoginAction;
-
-    fn new() -> Self {
-        Self {
-            username_input: Input::default(),
-            password_input: Input::default(),
-            current_field: InputField::default(),
-            theme: Theme::default(),
-        }
-    }
 
     fn handle_event(&mut self, event: Event) -> Option<Self::Action> {
         if let Event::Key(key) = event {
@@ -48,30 +38,27 @@ impl Component for LoginComponent {
         None
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let areas = compute_form_areas(area);
 
-        // Title
         let title = Paragraph::new("MOOCs Collect")
             .alignment(Alignment::Center)
-            .style(self.theme.title_style());
+            .style(theme.title_style());
         frame.render_widget(title, areas.title);
 
-        // Username
         let username_focused = self.current_field == InputField::Username;
         let username = Paragraph::new(self.username_input.value()).block(
             Block::default()
                 .title(" Username ")
                 .borders(Borders::ALL)
                 .border_style(if username_focused {
-                    self.theme.focused_border_style()
+                    theme.focused_border_style()
                 } else {
-                    self.theme.inactive_style()
+                    theme.inactive_style()
                 }),
         );
         frame.render_widget(username, areas.username);
 
-        // Password
         let password_focused = self.current_field == InputField::Password;
         let password_display = "*".repeat(self.password_input.value().len());
         let password = Paragraph::new(password_display).block(
@@ -79,22 +66,20 @@ impl Component for LoginComponent {
                 .title(" Password ")
                 .borders(Borders::ALL)
                 .border_style(if password_focused {
-                    self.theme.focused_border_style()
+                    theme.focused_border_style()
                 } else {
-                    self.theme.inactive_style()
+                    theme.inactive_style()
                 }),
         );
         frame.render_widget(password, areas.password);
 
-        // Help
-        let help = Paragraph::new("Tab: 切替 | Enter: 決定 | q: 終了")
+        let help = Paragraph::new("Tab: 切替 | Enter: 決定 | Ctrl+C: 終了")
             .alignment(Alignment::Center)
-            .style(self.theme.inactive_style());
+            .style(theme.inactive_style());
         frame.render_widget(help, areas.help);
     }
 }
 
-/// Layout areas for the login form
 struct FormAreas {
     title: Rect,
     username: Rect,
@@ -135,8 +120,14 @@ fn compute_form_areas(area: Rect) -> FormAreas {
 }
 
 impl LoginComponent {
-    /// Render the cursor at the current input field position.
-    /// Call separately so callers can skip it when a popup is visible.
+    pub fn new() -> Self {
+        Self {
+            username_input: Input::default(),
+            password_input: Input::default(),
+            current_field: InputField::default(),
+        }
+    }
+
     pub fn render_cursor(&self, frame: &mut Frame, area: Rect) {
         let areas = compute_form_areas(area);
         let username_focused = self.current_field == InputField::Username;
@@ -158,38 +149,28 @@ impl LoginComponent {
 
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<LoginAction> {
         match key.code {
-            KeyCode::Tab => {
+            KeyCode::Tab | KeyCode::BackTab => {
                 self.current_field = match self.current_field {
                     InputField::Username => InputField::Password,
                     InputField::Password => InputField::Username,
                 };
                 None
             }
-            KeyCode::BackTab => {
-                self.current_field = match self.current_field {
-                    InputField::Username => InputField::Password,
-                    InputField::Password => InputField::Username,
-                };
-                None
-            }
-            KeyCode::Enter => {
-                match self.current_field {
-                    InputField::Username => {
-                        // Move to password field
-                        self.current_field = InputField::Password;
+            KeyCode::Enter => match self.current_field {
+                InputField::Username => {
+                    self.current_field = InputField::Password;
+                    None
+                }
+                InputField::Password => {
+                    let username = self.username_input.value().trim().to_string();
+                    let password = self.password_input.value().to_string();
+                    if !username.is_empty() && !password.is_empty() {
+                        Some(LoginAction::Submit(Credentials { username, password }))
+                    } else {
                         None
                     }
-                    InputField::Password => {
-                        let username = self.username_input.value().trim().to_string();
-                        let password = self.password_input.value().to_string();
-                        if !username.is_empty() && !password.is_empty() {
-                            Some(LoginAction::Submit(Credentials { username, password }))
-                        } else {
-                            None
-                        }
-                    }
                 }
-            }
+            },
             _ => {
                 match self.current_field {
                     InputField::Username => {

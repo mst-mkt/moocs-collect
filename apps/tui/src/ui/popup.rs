@@ -24,7 +24,6 @@ fn centered_popup(area: Rect, width: u16, height: u16) -> Rect {
     popup_area
 }
 
-/// Render a loading popup
 pub fn render_loading(frame: &mut Frame, message: &str, theme: &Theme) {
     let popup_area = centered_popup(frame.area(), 40, 5);
     frame.render_widget(Clear, popup_area);
@@ -50,7 +49,6 @@ pub fn render_loading(frame: &mut Frame, message: &str, theme: &Theme) {
     frame.render_widget(paragraph, text_area);
 }
 
-/// Render an error popup
 pub fn render_error(frame: &mut Frame, message: &str, theme: &Theme) {
     let popup_area = centered_popup(frame.area(), 60, 8);
     frame.render_widget(Clear, popup_area);

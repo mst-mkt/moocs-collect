@@ -1,13 +1,17 @@
 use collect::{pdf, Collect, PageKey, SlideContent};
+use color_eyre::eyre::Result;
 use futures::stream::{self, StreamExt};
 use rayon::prelude::*;
 use std::{fs::create_dir_all, path::Path, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, Semaphore};
 
-use crate::app::AppAction;
-
 const MAX_RETRIES: u32 = 3;
 const MAX_CONCURRENT_REQUESTS: usize = 4;
+
+#[derive(Debug, Clone)]
+pub enum DownloadEvent {
+    Progress(PageKey, u8, String),
+}
 
 fn sanitize_filename(s: &str) -> String {
     #[cfg(windows)]
@@ -29,7 +33,7 @@ struct PageInfo {
     page_title: String,
 }
 
-async fn get_page_info(collect: &Collect, page_key: &PageKey) -> anyhow::Result<PageInfo> {
+async fn get_page_info(collect: &Collect, page_key: &PageKey) -> Result<PageInfo> {
     let page = collect.get_page_info(page_key).await?;
     let lecture = collect.get_lecture_info(&page.key.lecture_key).await?;
     let course = collect.get_course_info(&lecture.key.course_key).await?;
@@ -70,8 +74,8 @@ async fn save_slides(
     slide_contents: &[SlideContent],
     path: &Path,
     page_key: &PageKey,
-    tx: &mpsc::Sender<AppAction>,
-) -> anyhow::Result<()> {
+    tx: &mpsc::Sender<DownloadEvent>,
+) -> Result<()> {
     if slide_contents.is_empty() {
         return Ok(());
     }
@@ -113,7 +117,7 @@ async fn save_slides(
         preprocessed
             .par_iter()
             .enumerate()
-            .try_for_each(|(i, content)| -> anyhow::Result<()> {
+            .try_for_each(|(i, content)| -> Result<()> {
                 let filename = match len {
                     1 => format!(
                         "{} - {}.pdf",
@@ -146,9 +150,9 @@ pub async fn download_page(
     client: &reqwest::Client,
     page_key: &PageKey,
     download_path: &Path,
-    tx: &mpsc::Sender<AppAction>,
+    tx: &mpsc::Sender<DownloadEvent>,
     semaphore: &Arc<Semaphore>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     send_progress(tx, page_key, 5, "スライド取得中...").await;
 
     let slides = collect.get_slides(page_key).await?;
@@ -204,10 +208,10 @@ pub async fn download_page(
         #[allow(clippy::cast_possible_truncation)]
         let pct = 10 + (completed * 50 / total_slides) as u8;
         let _ = tx_clone
-            .send(AppAction::DownloadProgress(
+            .send(DownloadEvent::Progress(
                 pk.clone(),
                 pct,
-                format!("コンテンツ取得中... ({completed}/{})", total_slides),
+                format!("コンテンツ取得中... ({completed}/{total_slides})"),
             ))
             .await;
     }
@@ -220,9 +224,14 @@ pub async fn download_page(
     Ok(())
 }
 
-async fn send_progress(tx: &mpsc::Sender<AppAction>, page_key: &PageKey, percent: u8, phase: &str) {
+async fn send_progress(
+    tx: &mpsc::Sender<DownloadEvent>,
+    page_key: &PageKey,
+    percent: u8,
+    phase: &str,
+) {
     let _ = tx
-        .send(AppAction::DownloadProgress(
+        .send(DownloadEvent::Progress(
             page_key.clone(),
             percent,
             phase.to_string(),

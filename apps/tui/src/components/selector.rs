@@ -10,7 +10,7 @@ use ratatui::{
 use std::collections::{HashMap, HashSet};
 
 use super::download::ResolvedPage;
-use super::Component;
+use super::{move_list_selection, Component};
 use crate::ui::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -37,7 +37,6 @@ impl CheckState {
         }
     }
 
-    /// Compute aggregate check state from child states.
     fn aggregate(children: impl Iterator<Item = Self>) -> Self {
         let mut all_checked = true;
         let mut any_selected = false;
@@ -114,7 +113,6 @@ impl SelectionState {
         }
     }
 
-    /// Deselect a course and all its cached lectures/pages
     pub fn deselect_course_cascade(
         &mut self,
         course_key: &CourseKey,
@@ -133,8 +131,6 @@ impl SelectionState {
             }
         }
     }
-
-    /// Deselect a lecture and all its cached pages
     pub fn deselect_lecture_cascade(
         &mut self,
         lecture_key: &LectureKey,
@@ -148,7 +144,6 @@ impl SelectionState {
         }
     }
 
-    /// Get the check state for a course based on its children
     pub fn get_course_check_state(
         &self,
         course_key: &CourseKey,
@@ -170,7 +165,6 @@ impl SelectionState {
         )
     }
 
-    /// Get the check state for a lecture based on its children
     pub fn get_lecture_check_state(
         &self,
         lecture_key: &LectureKey,
@@ -196,8 +190,6 @@ impl SelectionState {
 
 pub struct SelectorComponent {
     courses: Vec<Course>,
-    lectures: Vec<Lecture>,
-    pages: Vec<LecturePage>,
 
     lectures_cache: HashMap<CourseKey, Vec<Lecture>>,
     pages_cache: HashMap<LectureKey, Vec<LecturePage>>,
@@ -214,18 +206,36 @@ pub struct SelectorComponent {
 
     focused_course_key: Option<CourseKey>,
     focused_lecture_key: Option<LectureKey>,
-
-    theme: Theme,
 }
 
 impl Component for SelectorComponent {
     type Action = SelectorAction;
 
-    fn new() -> Self {
+    fn handle_event(&mut self, event: Event) -> Option<Self::Action> {
+        if let Event::Key(key) = event {
+            return self.handle_key_event(key);
+        }
+        None
+    }
+
+    fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let [course_area, lecture_area, page_area] = Layout::horizontal([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .areas(area);
+
+        self.render_course_list(frame, course_area, theme);
+        self.render_lecture_list(frame, lecture_area, theme);
+        self.render_page_list(frame, page_area, theme);
+    }
+}
+
+impl SelectorComponent {
+    pub fn new() -> Self {
         Self {
             courses: Vec::new(),
-            lectures: Vec::new(),
-            pages: Vec::new(),
             lectures_cache: HashMap::new(),
             pages_cache: HashMap::new(),
             course_state: ListState::default(),
@@ -237,84 +247,73 @@ impl Component for SelectorComponent {
             loading_pages: false,
             focused_course_key: None,
             focused_lecture_key: None,
-            theme: Theme::default(),
         }
     }
 
-    fn handle_event(&mut self, event: Event) -> Option<Self::Action> {
-        if let Event::Key(key) = event {
-            return self.handle_key_event(key);
-        }
-        None
+    fn current_lectures(&self) -> &[Lecture] {
+        self.focused_course_key
+            .as_ref()
+            .and_then(|key| self.lectures_cache.get(key))
+            .map_or(&[], Vec::as_slice)
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
-        let [course_area, lecture_area, page_area] = Layout::horizontal([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-        ])
-        .areas(area);
-
-        self.render_course_list(frame, course_area);
-        self.render_lecture_list(frame, lecture_area);
-        self.render_page_list(frame, page_area);
+    fn current_pages(&self) -> &[LecturePage] {
+        self.focused_lecture_key
+            .as_ref()
+            .and_then(|key| self.pages_cache.get(key))
+            .map_or(&[], Vec::as_slice)
     }
-}
 
-impl SelectorComponent {
     pub fn set_courses(&mut self, courses: Vec<Course>) {
         self.courses = courses;
         if !self.courses.is_empty() {
             self.course_state.select(Some(0));
             self.focused_course_key = self.courses.first().map(|c| c.key.clone());
         }
-        self.lectures.clear();
-        self.pages.clear();
         self.lecture_state.select(None);
         self.page_state.select(None);
+        self.focused_lecture_key = None;
     }
 
     pub fn set_lectures(&mut self, lectures: Vec<Lecture>, for_course: &CourseKey) {
-        self.lectures_cache
-            .insert(for_course.clone(), lectures.clone());
+        self.lectures_cache.insert(for_course.clone(), lectures);
 
         if self.focused_course_key.as_ref() != Some(for_course) {
             return;
         }
 
         self.loading_lectures = false;
-        self.lectures = lectures;
 
-        if self.lectures.is_empty() {
+        let first_key = self.current_lectures().first().map(|l| l.key.clone());
+        let is_empty = first_key.is_none();
+        if is_empty {
             self.lecture_state.select(None);
             self.focused_lecture_key = None;
         } else {
             self.lecture_state.select(Some(0));
-            self.focused_lecture_key = self.lectures.first().map(|l| l.key.clone());
+            self.focused_lecture_key = first_key;
         }
 
         if let Some(course_key) = &self.focused_course_key {
             if self.selection.is_course_selected(course_key) {
-                self.selection.select_all_lectures(&self.lectures);
+                let lectures: Vec<_> = self.current_lectures().to_vec();
+                self.selection.select_all_lectures(&lectures);
             }
         }
 
-        self.pages.clear();
         self.page_state.select(None);
     }
 
     pub fn set_pages(&mut self, pages: Vec<LecturePage>, for_lecture: &LectureKey) {
-        self.pages_cache.insert(for_lecture.clone(), pages.clone());
+        self.pages_cache.insert(for_lecture.clone(), pages);
 
         if self.focused_lecture_key.as_ref() != Some(for_lecture) {
             return;
         }
 
         self.loading_pages = false;
-        self.pages = pages;
 
-        if self.pages.is_empty() {
+        if self.current_pages().is_empty() {
             self.page_state.select(None);
         } else {
             self.page_state.select(Some(0));
@@ -322,7 +321,8 @@ impl SelectorComponent {
 
         if let Some(lecture_key) = &self.focused_lecture_key {
             if self.selection.is_lecture_selected(lecture_key) {
-                self.selection.select_all_pages(&self.pages);
+                let pages: Vec<_> = self.current_pages().to_vec();
+                self.selection.select_all_pages(&pages);
             }
         }
     }
@@ -343,22 +343,23 @@ impl SelectorComponent {
         let Some(key) = self.focused_course_key.clone() else {
             return false;
         };
-        let Some(cached) = self.lectures_cache.get(&key).cloned() else {
+        if !self.lectures_cache.contains_key(&key) {
             return false;
-        };
-
-        self.loading_lectures = false;
-        self.lectures = cached;
-
-        if self.selection.is_course_selected(&key) {
-            self.selection.select_all_lectures(&self.lectures);
         }
 
-        if self.lectures.is_empty() {
+        self.loading_lectures = false;
+
+        if self.selection.is_course_selected(&key) {
+            let lectures: Vec<_> = self.current_lectures().to_vec();
+            self.selection.select_all_lectures(&lectures);
+        }
+
+        let first_key = self.current_lectures().first().map(|l| l.key.clone());
+        if first_key.is_none() {
             self.lecture_state.select(None);
         } else {
             self.lecture_state.select(Some(0));
-            self.focused_lecture_key = self.lectures.first().map(|l| l.key.clone());
+            self.focused_lecture_key = first_key;
         }
         true
     }
@@ -367,20 +368,21 @@ impl SelectorComponent {
         let Some(key) = self.focused_lecture_key.clone() else {
             return false;
         };
-        let Some(cached) = self.pages_cache.get(&key).cloned() else {
+        if !self.pages_cache.contains_key(&key) {
             return false;
-        };
+        }
 
         self.loading_pages = false;
-        self.pages = cached;
 
         let should_select = self.selection.is_lecture_selected(&key)
             || self.selection.is_course_selected(&key.course_key);
         if should_select {
-            self.selection.select_all_pages(&self.pages);
+            let pages: Vec<_> = self.current_pages().to_vec();
+            self.selection.select_all_pages(&pages);
         }
 
-        if self.pages.is_empty() {
+        let current = self.current_pages();
+        if current.is_empty() {
             self.page_state.select(None);
         } else {
             self.page_state.select(Some(0));
@@ -406,7 +408,7 @@ impl SelectorComponent {
         }
     }
 
-    fn move_column_left(&mut self) {
+    const fn move_column_left(&mut self) {
         self.current_column = match self.current_column {
             Column::Course | Column::Lecture => Column::Course,
             Column::Page => Column::Lecture,
@@ -416,14 +418,14 @@ impl SelectorComponent {
     fn move_column_right(&mut self) {
         self.current_column = match self.current_column {
             Column::Course => {
-                if !self.lectures.is_empty() || self.loading_lectures {
+                if !self.current_lectures().is_empty() || self.loading_lectures {
                     Column::Lecture
                 } else {
                     Column::Course
                 }
             }
             Column::Lecture => {
-                if !self.pages.is_empty() || self.loading_pages {
+                if !self.current_pages().is_empty() || self.loading_pages {
                     Column::Page
                 } else {
                     Column::Lecture
@@ -436,31 +438,20 @@ impl SelectorComponent {
     fn move_selection(&mut self, delta: i32) -> Option<SelectorAction> {
         match self.current_column {
             Column::Course => {
-                Self::move_list_selection(&mut self.course_state, self.courses.len(), delta);
+                move_list_selection(&mut self.course_state, self.courses.len(), delta);
                 self.on_course_focus_changed()
             }
             Column::Lecture => {
-                Self::move_list_selection(&mut self.lecture_state, self.lectures.len(), delta);
+                let len = self.current_lectures().len();
+                move_list_selection(&mut self.lecture_state, len, delta);
                 self.on_lecture_focus_changed()
             }
             Column::Page => {
-                Self::move_list_selection(&mut self.page_state, self.pages.len(), delta);
+                let len = self.current_pages().len();
+                move_list_selection(&mut self.page_state, len, delta);
                 None
             }
         }
-    }
-
-    fn move_list_selection(state: &mut ListState, len: usize, delta: i32) {
-        if len == 0 {
-            return;
-        }
-        let current = state.selected().unwrap_or(0);
-        let next = if delta > 0 {
-            current.saturating_add(delta as usize).min(len - 1)
-        } else {
-            current.saturating_sub(delta.unsigned_abs() as usize)
-        };
-        state.select(Some(next));
     }
 
     fn on_course_focus_changed(&mut self) -> Option<SelectorAction> {
@@ -475,12 +466,10 @@ impl SelectorComponent {
         }
 
         self.focused_course_key.clone_from(&new_key);
-        self.pages.clear();
         self.page_state.select(None);
         self.focused_lecture_key = None;
 
         let Some(key) = new_key else {
-            self.lectures.clear();
             self.lecture_state.select(None);
             return None;
         };
@@ -495,17 +484,17 @@ impl SelectorComponent {
             return None;
         }
 
-        self.lectures.clear();
         self.lecture_state.select(None);
         self.loading_lectures = true;
         Some(SelectorAction::FetchLectures(key))
     }
 
     fn on_lecture_focus_changed(&mut self) -> Option<SelectorAction> {
+        let lectures = self.current_lectures();
         let new_key = self
             .lecture_state
             .selected()
-            .and_then(|i| self.lectures.get(i))
+            .and_then(|i| lectures.get(i))
             .map(|l| l.key.clone());
 
         if new_key == self.focused_lecture_key {
@@ -515,7 +504,6 @@ impl SelectorComponent {
         self.focused_lecture_key.clone_from(&new_key);
 
         let Some(key) = new_key else {
-            self.pages.clear();
             self.page_state.select(None);
             return None;
         };
@@ -524,7 +512,6 @@ impl SelectorComponent {
             return None;
         }
 
-        self.pages.clear();
         self.page_state.select(None);
         self.loading_pages = true;
         Some(SelectorAction::FetchPages(key))
@@ -547,7 +534,6 @@ impl SelectorComponent {
 
                     match current_state {
                         CheckState::Checked => {
-                            // Deselect course and all children
                             self.selection.deselect_course_cascade(
                                 &key,
                                 &self.lectures_cache,
@@ -555,49 +541,45 @@ impl SelectorComponent {
                             );
                         }
                         CheckState::Unchecked | CheckState::Indeterminate => {
-                            // Select course and all visible children
                             self.selection.courses.insert(key);
-                            self.selection.select_all_lectures(&self.lectures);
-                            self.selection.select_all_pages(&self.pages);
+                            let lectures: Vec<_> = self.current_lectures().to_vec();
+                            let pages: Vec<_> = self.current_pages().to_vec();
+                            self.selection.select_all_lectures(&lectures);
+                            self.selection.select_all_pages(&pages);
                         }
                     }
                     return None;
                 }
             }
             Column::Lecture => {
-                if let Some(lecture) = self
-                    .lecture_state
-                    .selected()
-                    .and_then(|i| self.lectures.get(i))
-                {
+                let lectures = self.current_lectures();
+                if let Some(lecture) = self.lecture_state.selected().and_then(|i| lectures.get(i)) {
                     let key = lecture.key.clone();
                     let current_state = self
                         .selection
                         .get_lecture_check_state(&key, &self.pages_cache);
 
-                    // Remove parent course from selection (becomes indeterminate)
                     self.selection.courses.remove(&key.course_key);
 
                     match current_state {
                         CheckState::Checked => {
-                            // Deselect lecture and all children
                             self.selection
                                 .deselect_lecture_cascade(&key, &self.pages_cache);
                         }
                         CheckState::Unchecked | CheckState::Indeterminate => {
-                            // Select lecture and all visible pages
                             self.selection.lectures.insert(key);
-                            self.selection.select_all_pages(&self.pages);
+                            let pages: Vec<_> = self.current_pages().to_vec();
+                            self.selection.select_all_pages(&pages);
                         }
                     }
                     return None;
                 }
             }
             Column::Page => {
-                if let Some(page) = self.page_state.selected().and_then(|i| self.pages.get(i)) {
+                let pages = self.current_pages();
+                if let Some(page) = self.page_state.selected().and_then(|i| pages.get(i)) {
                     let key = page.key.clone();
 
-                    // Remove parent lecture and course from selection (becomes indeterminate)
                     self.selection.lectures.remove(&key.lecture_key);
                     self.selection.courses.remove(&key.lecture_key.course_key);
 
@@ -609,7 +591,7 @@ impl SelectorComponent {
         None
     }
 
-    fn render_course_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_course_list(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let title = " 科目 ";
         let items: Vec<_> = self
             .courses
@@ -623,24 +605,26 @@ impl SelectorComponent {
                 (state, c.display_name())
             })
             .collect();
-        self.render_list(
+        let focused = self.current_column == Column::Course;
+        Self::render_list(
             frame,
             area,
             title,
             &items,
-            &self.course_state,
-            self.current_column == Column::Course,
+            &mut self.course_state,
+            focused,
+            theme,
         );
     }
 
-    fn render_lecture_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_lecture_list(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let title = if self.loading_lectures {
             " 講義 (読み込み中...) "
         } else {
             " 講義 "
         };
-        let items: Vec<_> = self
-            .lectures
+        let lectures = self.current_lectures().to_vec();
+        let items: Vec<_> = lectures
             .iter()
             .map(|l| {
                 let state = self
@@ -649,24 +633,26 @@ impl SelectorComponent {
                 (state, l.display_name())
             })
             .collect();
-        self.render_list(
+        let focused = self.current_column == Column::Lecture;
+        Self::render_list(
             frame,
             area,
             title,
             &items,
-            &self.lecture_state,
-            self.current_column == Column::Lecture,
+            &mut self.lecture_state,
+            focused,
+            theme,
         );
     }
 
-    fn render_page_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_page_list(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let title = if self.loading_pages {
             " ページ (読み込み中...) "
         } else {
             " ページ "
         };
-        let items: Vec<_> = self
-            .pages
+        let pages = self.current_pages().to_vec();
+        let items: Vec<_> = pages
             .iter()
             .map(|p| {
                 let state = if self.selection.is_page_selected(&p.key) {
@@ -677,24 +663,26 @@ impl SelectorComponent {
                 (state, p.display_name())
             })
             .collect();
-        self.render_list(
+        let focused = self.current_column == Column::Page;
+        Self::render_list(
             frame,
             area,
             title,
             &items,
-            &self.page_state,
-            self.current_column == Column::Page,
+            &mut self.page_state,
+            focused,
+            theme,
         );
     }
 
     fn render_list(
-        &self,
         frame: &mut Frame,
         area: Rect,
         title: &str,
         items: &[(CheckState, &str)],
-        state: &ListState,
+        state: &mut ListState,
         focused: bool,
+        theme: &Theme,
     ) {
         let list_items: Vec<ListItem> = items
             .iter()
@@ -708,9 +696,9 @@ impl SelectorComponent {
             .title(title)
             .borders(Borders::ALL)
             .border_style(if focused {
-                self.theme.focused_border_style()
+                theme.focused_border_style()
             } else {
-                self.theme.inactive_style()
+                theme.inactive_style()
             });
 
         let list = List::new(list_items)
@@ -718,23 +706,19 @@ impl SelectorComponent {
             .highlight_style(
                 Style::default()
                     .add_modifier(Modifier::REVERSED)
-                    .fg(self.theme.primary),
+                    .fg(theme.primary),
             )
             .highlight_symbol("> ");
 
-        frame.render_stateful_widget(list, area, &mut state.clone());
+        frame.render_stateful_widget(list, area, state);
     }
 
-    /// Returns (courses needing lectures, lectures needing pages) that are
-    /// selected but not yet cached.
     pub fn get_unfetched_for_selection(&self) -> (Vec<CourseKey>, Vec<LectureKey>) {
         let mut courses_to_fetch = Vec::new();
         let mut lectures_to_fetch = Vec::new();
 
-        // Selected courses whose lectures haven't been fetched
         for course_key in &self.selection.courses {
             if let Some(lectures) = self.lectures_cache.get(course_key) {
-                // Lectures cached — check each for pages
                 for lecture in lectures {
                     if !self.pages_cache.contains_key(&lecture.key) {
                         lectures_to_fetch.push(lecture.key.clone());
@@ -745,10 +729,9 @@ impl SelectorComponent {
             }
         }
 
-        // Individually selected lectures (not under a selected course) whose pages haven't been fetched
         for lecture_key in &self.selection.lectures {
             if self.selection.courses.contains(&lecture_key.course_key) {
-                continue; // Already handled above
+                continue;
             }
             if !self.pages_cache.contains_key(lecture_key) {
                 lectures_to_fetch.push(lecture_key.clone());
@@ -758,9 +741,6 @@ impl SelectorComponent {
         (courses_to_fetch, lectures_to_fetch)
     }
 
-    /// Resolves all pages that should be downloaded based on the full selection
-    /// hierarchy: selected courses → all lectures → all pages, selected
-    /// lectures → all pages, and individually selected pages.
     pub fn resolve_selected_pages(&self) -> Vec<ResolvedPage> {
         let course_names: HashMap<&CourseKey, &str> = self
             .courses
@@ -812,7 +792,6 @@ impl SelectorComponent {
             });
         };
 
-        // 1. Pages from selected courses (via cache)
         for course_key in &self.selection.courses {
             if let Some(lectures) = self.lectures_cache.get(course_key) {
                 for lecture in lectures {
@@ -825,7 +804,6 @@ impl SelectorComponent {
             }
         }
 
-        // 2. Pages from individually selected lectures (not under selected course)
         for lecture_key in &self.selection.lectures {
             if self.selection.courses.contains(&lecture_key.course_key) {
                 continue;
@@ -837,7 +815,6 @@ impl SelectorComponent {
             }
         }
 
-        // 3. Individually selected pages
         for page_key in &self.selection.pages {
             if self.selection.lectures.contains(&page_key.lecture_key)
                 || self

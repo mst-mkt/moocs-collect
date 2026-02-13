@@ -1,50 +1,39 @@
-use clap::{Arg, Command};
+use clap::Parser;
 use color_eyre::Result;
 use std::path::PathBuf;
 
 mod app;
 mod components;
 mod download;
+mod error;
+mod service;
+mod state;
 mod ui;
 
 use app::App;
+
+#[derive(Parser)]
+#[command(
+    name = "collect-tui",
+    version,
+    about = "INIAD MOOCs スライドダウンローダー"
+)]
+struct Args {
+    #[arg(long)]
+    path: Option<PathBuf>,
+
+    #[arg(long)]
+    year: Option<u32>,
+
+    #[arg(long, short = 'j', default_value = "5")]
+    concurrency: usize,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let matches = Command::new("collect-tui")
-        .version("0.0.0")
-        .about("INIAD MOOCs スライドダウンローダー")
-        .arg(
-            Arg::new("path")
-                .long("path")
-                .value_name("PATH")
-                .help("Download directory path")
-                .value_parser(clap::value_parser!(PathBuf)),
-        )
-        .arg(
-            Arg::new("year")
-                .long("year")
-                .value_name("YEAR")
-                .help("Target year")
-                .value_parser(clap::value_parser!(u32)),
-        )
-        .arg(
-            Arg::new("concurrency")
-                .long("concurrency")
-                .short('j')
-                .value_name("NUM")
-                .help("Number of concurrent downloads")
-                .default_value("5")
-                .value_parser(clap::value_parser!(usize)),
-        )
-        .get_matches();
-
-    let download_path = matches.get_one::<PathBuf>("path").cloned();
-    let year = matches.get_one::<u32>("year").copied();
-    let concurrency = matches.get_one::<usize>("concurrency").copied().unwrap();
-
-    let mut app = App::new(download_path, year, concurrency);
-    app.run()
+    let args = Args::parse();
+    let mut app = App::new(args.path, args.year, args.concurrency);
+    app.run().await
 }

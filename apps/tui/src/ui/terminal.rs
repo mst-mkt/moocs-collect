@@ -9,6 +9,7 @@ use std::io::{self, Stdout};
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 pub fn setup() -> Result<Tui> {
+    install_panic_hook();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -21,4 +22,13 @@ pub fn restore() -> Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     Ok(())
+}
+
+fn install_panic_hook() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        original_hook(panic_info);
+    }));
 }

@@ -1,86 +1,65 @@
-use collect::{
-    Collect, Course, CourseKey, Credentials, Lecture, LectureKey, LecturePage, PageKey, Year,
-};
+use collect::{Collect, Course, CourseKey, Credentials, Lecture, LectureKey, LecturePage, PageKey};
 use color_eyre::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures::StreamExt;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, Tabs},
     Frame,
 };
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::components::{
     login::LoginAction, selector::SelectorAction, Component, DownloadComponent, LoginComponent,
     SelectorComponent,
 };
+use crate::error::TuiError;
+use crate::service::AppService;
+use crate::state::{AppState, LoginPhase, LoginState, MainState, SelectorPhase, Tab};
 use crate::ui::{self, terminal, Theme, Tui};
 
 const MAX_HTTP_PERMITS: usize = 8;
-/// Minimum footer width for responsive layout
 const MIN_FOOTER_WIDTH: u16 = 60;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Screen {
-    #[default]
-    Login,
-    Main,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Tab {
-    #[default]
-    Selector,
-    Download,
-}
 
 #[derive(Debug, Clone)]
 pub enum AppAction {
     Login(Credentials),
     LoginSuccess,
-    LoginFailed(String),
+
     FetchCourses,
     CoursesLoaded(Vec<Course>),
-    CoursesFailed(String),
     FetchLectures(CourseKey),
     LecturesLoaded(CourseKey, Vec<Lecture>),
-    LecturesFailed(String),
     FetchPages(LectureKey),
     PagesLoaded(LectureKey, Vec<LecturePage>),
-    PagesFailed(String),
+
     SwitchTab(Tab),
     EnqueueDownloads,
     StartNextDownload,
+
     DownloadProgress(PageKey, u8, String),
     DownloadCompleted(PageKey),
     DownloadFailed(PageKey, String),
+
+    Error(TuiError),
+
     ClearError,
     Quit,
 }
 
-#[allow(clippy::struct_excessive_bools)]
 pub struct App {
-    screen: Screen,
-    active_tab: Tab,
+    state: AppState,
     error: Option<String>,
     running: bool,
-    year: Option<u32>,
-    download_path: PathBuf,
     concurrency: usize,
     login: LoginComponent,
     selector: SelectorComponent,
     download: DownloadComponent,
     theme: Theme,
-    client: reqwest::Client,
-    collect: Collect,
-    semaphore: Arc<Semaphore>,
-    action_tx: mpsc::Sender<AppAction>,
+    service: AppService,
     action_rx: mpsc::Receiver<AppAction>,
-    authenticating: bool,
-    loading_courses: bool,
-    pending_enqueue: bool,
 }
 
 impl App {
@@ -93,73 +72,81 @@ impl App {
             .build()
             .unwrap_or_default();
         let collect = Collect::from(Arc::new(client.clone()));
+        let download_path = download_path.unwrap_or_else(|| PathBuf::from("."));
+
+        let service = AppService::new(
+            collect,
+            client,
+            Arc::new(Semaphore::new(MAX_HTTP_PERMITS)),
+            action_tx,
+            download_path,
+            year,
+        );
 
         Self {
-            screen: Screen::default(),
-            active_tab: Tab::default(),
+            state: AppState::default(),
             error: None,
             running: true,
-            year,
-            download_path: download_path.unwrap_or_else(|| PathBuf::from(".")),
             concurrency,
             login: LoginComponent::new(),
             selector: SelectorComponent::new(),
             download: DownloadComponent::new(),
             theme: Theme::default(),
-            client,
-            collect,
-            semaphore: Arc::new(Semaphore::new(MAX_HTTP_PERMITS)),
-            action_tx,
+            service,
             action_rx,
-            authenticating: false,
-            loading_courses: false,
-            pending_enqueue: false,
         }
     }
 
-    pub fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
         let mut terminal = terminal::setup()?;
-        let result = self.main_loop(&mut terminal);
+        let result = self.main_loop(&mut terminal).await;
         terminal::restore()?;
         result
     }
 
-    fn main_loop(&mut self, terminal: &mut Tui) -> Result<()> {
-        while self.running {
-            terminal.draw(|frame| self.render(frame))?;
+    async fn main_loop(&mut self, terminal: &mut Tui) -> Result<()> {
+        let mut event_stream = EventStream::new();
 
-            while let Ok(action) = self.action_rx.try_recv() {
-                self.dispatch(action);
-            }
+        terminal.draw(|frame| self.render(frame))?;
 
-            // Process all available events before next render
-            while event::poll(Duration::ZERO)? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        self.handle_key(key.code, key.modifiers);
+        loop {
+            tokio::select! {
+                Some(action) = self.action_rx.recv() => {
+                    self.dispatch(action);
+                    while let Ok(action) = self.action_rx.try_recv() {
+                        self.dispatch(action);
+                    }
+                }
+                Some(Ok(event)) = event_stream.next() => {
+                    if let Event::Key(key) = event {
+                        if key.kind == KeyEventKind::Press {
+                            self.handle_key(key);
+                        }
                     }
                 }
             }
 
-            // Sleep briefly to avoid busy-waiting when idle
-            std::thread::sleep(Duration::from_millis(16));
+            if !self.running {
+                break;
+            }
+
+            terminal.draw(|frame| self.render(frame))?;
         }
+
         Ok(())
     }
 
-    fn render(&self, frame: &mut Frame) {
+    fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        let has_popup = self.authenticating || self.loading_courses || self.error.is_some();
-
-        match self.screen {
-            Screen::Login => {
-                self.login.render(frame, area);
-                if !has_popup {
+        match &self.state {
+            AppState::Login(_) => {
+                self.login.render(frame, area, &self.theme);
+                if self.state.can_handle_input() && self.error.is_none() {
                     self.login.render_cursor(frame, area);
                 }
             }
-            Screen::Main => {
+            AppState::Main(main_state) => {
                 let [tab_area, content_area, footer_area] = Layout::vertical([
                     Constraint::Length(3),
                     Constraint::Fill(1),
@@ -169,21 +156,17 @@ impl App {
 
                 self.render_tab_bar(frame, tab_area);
 
-                match self.active_tab {
-                    Tab::Selector => self.selector.render(frame, content_area),
-                    Tab::Download => self.download.render(frame, content_area),
+                match main_state.active_tab {
+                    Tab::Selector => self.selector.render(frame, content_area, &self.theme),
+                    Tab::Download => self.download.render(frame, content_area, &self.theme),
                 }
 
                 self.render_footer(frame, footer_area);
             }
         }
 
-        if self.authenticating {
-            ui::render_loading(frame, "ログイン中...", &self.theme);
-        }
-
-        if self.loading_courses {
-            ui::render_loading(frame, "科目を取得中...", &self.theme);
+        if let Some(message) = self.state.loading_message() {
+            ui::render_loading(frame, message, &self.theme);
         }
 
         if let Some(ref error) = self.error {
@@ -193,9 +176,14 @@ impl App {
 
     fn render_tab_bar(&self, frame: &mut Frame, area: Rect) {
         let titles = vec![Line::from("講義一覧"), Line::from("ダウンロード")];
-        let selected = match self.active_tab {
-            Tab::Selector => 0,
-            Tab::Download => 1,
+
+        let selected = if let AppState::Main(main_state) = &self.state {
+            match main_state.active_tab {
+                Tab::Selector => 0,
+                Tab::Download => 1,
+            }
+        } else {
+            0
         };
 
         let tabs = Tabs::new(titles)
@@ -223,7 +211,13 @@ impl App {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let nav_spans = match self.active_tab {
+        let active_tab = if let AppState::Main(main_state) = &self.state {
+            main_state.active_tab
+        } else {
+            Tab::Selector
+        };
+
+        let nav_spans = match active_tab {
             Tab::Selector => vec![
                 Span::styled("↑↓", ks),
                 Span::styled(": 移動", ds),
@@ -243,7 +237,7 @@ impl App {
             ],
         };
 
-        let action_spans = match self.active_tab {
+        let action_spans = match active_tab {
             Tab::Selector => vec![
                 Span::styled("Space", ks),
                 Span::styled(": 選択", ds),
@@ -257,9 +251,7 @@ impl App {
             Tab::Download => vec![Span::styled("q", ks), Span::styled(": 終了", ds)],
         };
 
-        // Responsive: use left-right layout if wide enough, fall back to simplified help
         if inner.width >= MIN_FOOTER_WIDTH {
-            // Single row: navigation on the left, actions on the right
             let [left_area, right_area] =
                 Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(inner);
 
@@ -276,7 +268,6 @@ impl App {
             frame.render_widget(left_line, left_area);
             frame.render_widget(right_line, right_area);
         } else {
-            // Narrow screen: show simplified single-line help
             let simplified_spans = vec![
                 Span::raw(" "),
                 Span::styled("Tab", ks),
@@ -290,34 +281,40 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        if self.authenticating {
+    fn handle_key(&mut self, key: KeyEvent) {
+        if !self.state.can_handle_input() {
             return;
         }
 
-        if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL))
-            || matches!(code, KeyCode::Esc | KeyCode::Char('q'))
-        {
-            if self.error.is_some() {
+        let code = key.code;
+        let modifiers = key.modifiers;
+
+        if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL)) {
+            self.dispatch(AppAction::Quit);
+            return;
+        }
+
+        if self.error.is_some() {
+            if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
                 self.dispatch(AppAction::ClearError);
-            } else {
-                self.dispatch(AppAction::Quit);
             }
             return;
         }
 
-        match self.screen {
-            Screen::Login => {
-                if let Some(LoginAction::Submit(creds)) = self
-                    .login
-                    .handle_event(Event::Key(event::KeyEvent::new(code, modifiers)))
-                {
+        match &self.state {
+            AppState::Login(_) => {
+                if let Some(LoginAction::Submit(creds)) = self.login.handle_event(Event::Key(key)) {
                     self.dispatch(AppAction::Login(creds));
                 }
             }
-            Screen::Main => {
+            AppState::Main(main_state) => {
+                if matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
+                    self.dispatch(AppAction::Quit);
+                    return;
+                }
+
                 if code == KeyCode::Tab {
-                    let new_tab = match self.active_tab {
+                    let new_tab = match main_state.active_tab {
                         Tab::Selector => Tab::Download,
                         Tab::Download => Tab::Selector,
                     };
@@ -325,12 +322,9 @@ impl App {
                     return;
                 }
 
-                match self.active_tab {
+                match main_state.active_tab {
                     Tab::Selector => {
-                        if let Some(action) = self
-                            .selector
-                            .handle_event(Event::Key(event::KeyEvent::new(code, modifiers)))
-                        {
+                        if let Some(action) = self.selector.handle_event(Event::Key(key)) {
                             match action {
                                 SelectorAction::FetchLectures(key) => {
                                     self.dispatch(AppAction::FetchLectures(key));
@@ -345,47 +339,42 @@ impl App {
                         }
                     }
                     Tab::Download => {
-                        let _ = self
-                            .download
-                            .handle_event(Event::Key(event::KeyEvent::new(code, modifiers)));
+                        let _ = self.download.handle_event(Event::Key(key));
                     }
                 }
             }
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn dispatch(&mut self, action: AppAction) {
         match action {
             AppAction::Login(creds) => {
-                self.authenticating = true;
+                self.state = AppState::Login(LoginState {
+                    phase: LoginPhase::Authenticating,
+                });
                 self.error = None;
-                self.start_authentication(creds);
+                self.service.authenticate(creds);
             }
             AppAction::LoginSuccess => {
-                self.authenticating = false;
+                self.state = AppState::Main(MainState {
+                    active_tab: Tab::Selector,
+                    selector_phase: SelectorPhase::Idle,
+                });
                 self.error = None;
-                self.screen = Screen::Main;
                 self.dispatch(AppAction::FetchCourses);
             }
-            AppAction::LoginFailed(msg) => {
-                self.authenticating = false;
-                self.error = Some(msg);
-            }
-            AppAction::CoursesFailed(msg) => {
-                self.loading_courses = false;
-                self.error = Some(msg);
-            }
-            AppAction::LecturesFailed(msg) | AppAction::PagesFailed(msg) => {
-                if !self.pending_enqueue && self.active_tab == Tab::Selector {
-                    self.error = Some(msg);
-                }
-            }
+
             AppAction::FetchCourses => {
-                self.loading_courses = true;
-                self.start_fetch_courses();
+                if let AppState::Main(ref mut main) = self.state {
+                    main.selector_phase = SelectorPhase::LoadingCourses;
+                }
+                self.service.fetch_courses();
             }
             AppAction::CoursesLoaded(courses) => {
-                self.loading_courses = false;
+                if let AppState::Main(ref mut main) = self.state {
+                    main.selector_phase = SelectorPhase::Ready;
+                }
                 self.selector.set_courses(courses);
                 if let Some(SelectorAction::FetchLectures(key)) =
                     self.selector.request_initial_data()
@@ -395,7 +384,7 @@ impl App {
             }
             AppAction::FetchLectures(key) => {
                 self.selector.set_loading_lectures(true);
-                self.start_fetch_lectures(key);
+                self.service.fetch_lectures(key);
             }
             AppAction::LecturesLoaded(course_key, lectures) => {
                 self.selector.set_lectures(lectures, &course_key);
@@ -404,22 +393,33 @@ impl App {
                         self.dispatch(AppAction::FetchPages(key));
                     }
                 }
-                if self.pending_enqueue {
+                if let AppState::Main(MainState {
+                    selector_phase: SelectorPhase::EnqueuePending,
+                    ..
+                }) = &self.state
+                {
                     self.try_enqueue_downloads();
                 }
             }
             AppAction::FetchPages(key) => {
                 self.selector.set_loading_pages(true);
-                self.start_fetch_pages(key);
+                self.service.fetch_pages(key);
             }
             AppAction::PagesLoaded(lecture_key, pages) => {
                 self.selector.set_pages(pages, &lecture_key);
-                if self.pending_enqueue {
+                if let AppState::Main(MainState {
+                    selector_phase: SelectorPhase::EnqueuePending,
+                    ..
+                }) = &self.state
+                {
                     self.try_enqueue_downloads();
                 }
             }
+
             AppAction::SwitchTab(tab) => {
-                self.active_tab = tab;
+                if let AppState::Main(ref mut main) = self.state {
+                    main.active_tab = tab;
+                }
             }
             AppAction::EnqueueDownloads => {
                 self.try_enqueue_downloads();
@@ -427,6 +427,7 @@ impl App {
             AppAction::StartNextDownload => {
                 self.fill_download_slots();
             }
+
             AppAction::DownloadProgress(page_key, progress, ref phase) => {
                 self.download.update_progress(&page_key, progress, phase);
             }
@@ -438,6 +439,19 @@ impl App {
                 self.download.mark_failed(&page_key, msg);
                 self.dispatch(AppAction::StartNextDownload);
             }
+
+            AppAction::Error(err) => {
+                match &mut self.state {
+                    AppState::Login(ref mut login) => {
+                        login.phase = LoginPhase::Input;
+                    }
+                    AppState::Main(ref mut main) => {
+                        main.selector_phase = SelectorPhase::Idle;
+                    }
+                }
+                self.error = Some(err.user_message());
+            }
+
             AppAction::ClearError => {
                 self.error = None;
             }
@@ -452,124 +466,42 @@ impl App {
         let has_missing = !courses_to_fetch.is_empty() || !lectures_to_fetch.is_empty();
 
         for key in courses_to_fetch {
-            self.start_fetch_lectures(key);
+            self.service.fetch_lectures(key);
         }
         for key in lectures_to_fetch {
-            self.start_fetch_pages(key);
+            self.service.fetch_pages(key);
         }
 
         if has_missing {
-            self.pending_enqueue = true;
+            if let AppState::Main(ref mut main) = self.state {
+                main.selector_phase = SelectorPhase::EnqueuePending;
+            }
             return;
         }
 
-        self.pending_enqueue = false;
+        if let AppState::Main(ref mut main) = self.state {
+            main.selector_phase = SelectorPhase::Idle;
+        }
         self.error = None;
         let resolved = self.selector.resolve_selected_pages();
         if resolved.is_empty() {
             return;
         }
         self.download.enqueue(resolved);
-        self.active_tab = Tab::Download;
+        if let AppState::Main(ref mut main) = self.state {
+            main.active_tab = Tab::Download;
+        }
         self.fill_download_slots();
-    }
-
-    fn start_authentication(&self, credentials: Credentials) {
-        let collect = self.collect.clone();
-        let tx = self.action_tx.clone();
-
-        tokio::spawn(async move {
-            let result = collect.authenticate(&credentials).await;
-            let action = match result {
-                Ok(()) => AppAction::LoginSuccess,
-                Err(e) => {
-                    let msg = match e {
-                        collect::error::CollectError::Authentication { reason } => {
-                            format!("認証に失敗しました: {reason}")
-                        }
-                        _ => "ログインに失敗しました。ユーザー名とパスワードを確認してください"
-                            .to_string(),
-                    };
-                    AppAction::LoginFailed(msg)
-                }
-            };
-            let _ = tx.send(action).await;
-        });
-    }
-
-    fn start_fetch_courses(&self) {
-        let collect = self.collect.clone();
-        let tx = self.action_tx.clone();
-        let year = self.year.and_then(|y| Year::new(y).ok());
-
-        tokio::spawn(async move {
-            let action = collect.get_courses(year).await.map_or_else(
-                |_| AppAction::CoursesFailed("科目の取得に失敗しました".to_string()),
-                AppAction::CoursesLoaded,
-            );
-            let _ = tx.send(action).await;
-        });
-    }
-
-    fn start_fetch_lectures(&self, course_key: CourseKey) {
-        let collect = self.collect.clone();
-        let tx = self.action_tx.clone();
-
-        tokio::spawn(async move {
-            let action = collect.get_lectures(&course_key).await.map_or_else(
-                |_| AppAction::LecturesFailed("講義の取得に失敗しました".to_string()),
-                |lectures| AppAction::LecturesLoaded(course_key, lectures),
-            );
-            let _ = tx.send(action).await;
-        });
-    }
-
-    fn start_fetch_pages(&self, lecture_key: LectureKey) {
-        let collect = self.collect.clone();
-        let tx = self.action_tx.clone();
-
-        tokio::spawn(async move {
-            let action = collect.get_pages(&lecture_key).await.map_or_else(
-                |_| AppAction::PagesFailed("ページの取得に失敗しました".to_string()),
-                |pages| AppAction::PagesLoaded(lecture_key, pages),
-            );
-            let _ = tx.send(action).await;
-        });
     }
 
     fn fill_download_slots(&mut self) {
         while self.download.active_count() < self.concurrency {
             if let Some(page_key) = self.download.next_pending() {
                 self.download.update_progress(&page_key, 0, "開始中...");
-                self.start_download(page_key);
+                self.service.download(page_key);
             } else {
                 break;
             }
         }
-    }
-
-    fn start_download(&self, page_key: PageKey) {
-        let collect = self.collect.clone();
-        let client = self.client.clone();
-        let tx = self.action_tx.clone();
-        let download_path = self.download_path.clone();
-        let semaphore = self.semaphore.clone();
-
-        tokio::spawn(async move {
-            let result = crate::download::download_page(
-                &collect,
-                &client,
-                &page_key,
-                &download_path,
-                &tx,
-                &semaphore,
-            )
-            .await;
-            let action = match result {
-                Ok(()) => AppAction::DownloadCompleted(page_key),
-                Err(e) => AppAction::DownloadFailed(page_key, format!("{e:#}")),
-            };
-            let _ = tx.send(action).await;
-        });
     }
 }

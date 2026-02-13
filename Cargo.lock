@@ -1019,7 +1019,6 @@ dependencies = [
 name = "collect-tui"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "clap",
  "collect",
  "color-eyre",
@@ -1028,6 +1027,7 @@ dependencies = [
  "ratatui",
  "rayon",
  "reqwest",
+ "thiserror 2.0.16",
  "tokio",
  "tui-input",
 ]
@@ -1295,6 +1295,7 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.10.0",
  "crossterm_winapi",
+ "futures-core",
  "mio",
  "parking_lot",
  "rustix 0.38.44",

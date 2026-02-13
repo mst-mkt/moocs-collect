@@ -9,16 +9,16 @@ workspace = true
 [dependencies]
 collect = { path = "../../" }
 
-anyhow = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 rayon = { workspace = true }
 ratatui = "0.28.1"
-crossterm = "0.28.1"
+crossterm = { version = "0.28.1", features = ["event-stream"] }
 color-eyre = "0.6.3"
 tui-input = "0.10.0"
 clap = { version = "4.5.20", features = ["derive"] }
+thiserror = "2.0"
 
 [[bin]]
 name = "collect-tui"
