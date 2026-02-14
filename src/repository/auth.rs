@@ -83,6 +83,7 @@ impl AuthenticationRepositoryImpl {
 #[async_trait]
 impl AuthenticationRepository for AuthenticationRepositoryImpl {
     async fn login_moocs(&self, credentials: &Credentials) -> Result<()> {
+        self.auth_cache.remove(&AuthCacheKey::MoocsAuth);
         let login_url = "https://moocs.iniad.org/auth/iniad";
         let response = self.client.get(login_url).send().await?;
         let response_url = response.url().to_string();
@@ -106,6 +107,7 @@ impl AuthenticationRepository for AuthenticationRepositoryImpl {
     }
 
     async fn login_google(&self, credentials: &Credentials) -> Result<()> {
+        self.auth_cache.remove(&AuthCacheKey::GoogleAuth);
         let login_url = "https://accounts.google.com/samlredirect?domain=iniad.org";
         let response = self.client.get(login_url).send().await?;
         let mut base_url = response.url().clone();
