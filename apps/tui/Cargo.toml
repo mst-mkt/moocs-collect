@@ -19,6 +19,11 @@ color-eyre = "0.6.3"
 tui-input = "0.10.0"
 clap = { version = "4.5.20", features = ["derive"] }
 thiserror = "2.0"
+keyring = { version = "3.6.2", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
 
 [[bin]]
 name = "collect-tui"

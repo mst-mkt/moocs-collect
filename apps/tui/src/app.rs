@@ -2,6 +2,7 @@ use collect::{Collect, Course, CourseKey, Credentials, Lecture, LectureKey, Lect
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
+use keyring::Entry;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},
@@ -22,10 +23,12 @@ use crate::ui::{self, terminal, Theme, Tui};
 
 const MAX_HTTP_PERMITS: usize = 8;
 const MIN_FOOTER_WIDTH: u16 = 60;
+const KEYRING_SERVICE: &str = "me.yu7400ki.moocs-collect";
+const KEYRING_LAST_USER: &str = "__last_username__";
 
 #[derive(Debug, Clone)]
 pub enum AppAction {
-    Login(Credentials),
+    Login(Credentials, bool),
     LoginSuccess,
 
     FetchCourses,
@@ -60,6 +63,8 @@ pub struct App {
     theme: Theme,
     service: AppService,
     action_rx: mpsc::Receiver<AppAction>,
+    pending_remember: bool,
+    pending_credentials: Option<Credentials>,
 }
 
 impl App {
@@ -83,17 +88,61 @@ impl App {
             year,
         );
 
+        let mut login = LoginComponent::new();
+        let (stored_username, stored_password) = Self::load_stored_credentials();
+        if let Some(ref username) = stored_username {
+            login.set_username(username);
+            if let Some(ref password) = stored_password {
+                login.set_password(password);
+                login.set_remember(true);
+            }
+        }
+
         Self {
             state: AppState::default(),
             error: None,
             running: true,
             concurrency,
-            login: LoginComponent::new(),
+            login,
             selector: SelectorComponent::new(),
             download: DownloadComponent::new(),
             theme: Theme::default(),
             service,
             action_rx,
+            pending_remember: false,
+            pending_credentials: None,
+        }
+    }
+
+    fn load_stored_credentials() -> (Option<String>, Option<String>) {
+        let Ok(username_entry) = Entry::new(KEYRING_SERVICE, KEYRING_LAST_USER) else {
+            return (None, None);
+        };
+        let Ok(username) = username_entry.get_password() else {
+            return (None, None);
+        };
+        let Ok(password_entry) = Entry::new(KEYRING_SERVICE, &username) else {
+            return (Some(username), None);
+        };
+        let password = password_entry.get_password().ok();
+        (Some(username), password)
+    }
+
+    fn save_credentials(creds: &Credentials) {
+        if let Ok(entry) = Entry::new(KEYRING_SERVICE, KEYRING_LAST_USER) {
+            let _ = entry.set_password(&creds.username);
+        }
+        if let Ok(entry) = Entry::new(KEYRING_SERVICE, &creds.username) {
+            let _ = entry.set_password(&creds.password);
+        }
+    }
+
+    fn delete_credentials(username: &str) {
+        if let Ok(entry) = Entry::new(KEYRING_SERVICE, username) {
+            let _ = entry.delete_credential();
+        }
+        if let Ok(entry) = Entry::new(KEYRING_SERVICE, KEYRING_LAST_USER) {
+            let _ = entry.delete_credential();
         }
     }
 
@@ -303,8 +352,10 @@ impl App {
 
         match &self.state {
             AppState::Login(_) => {
-                if let Some(LoginAction::Submit(creds)) = self.login.handle_event(Event::Key(key)) {
-                    self.dispatch(AppAction::Login(creds));
+                if let Some(LoginAction::Submit(creds, remember)) =
+                    self.login.handle_event(Event::Key(key))
+                {
+                    self.dispatch(AppAction::Login(creds, remember));
                 }
             }
             AppState::Main(main_state) => {
@@ -349,7 +400,9 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn dispatch(&mut self, action: AppAction) {
         match action {
-            AppAction::Login(creds) => {
+            AppAction::Login(creds, remember) => {
+                self.pending_remember = remember;
+                self.pending_credentials = Some(creds.clone());
                 self.state = AppState::Login(LoginState {
                     phase: LoginPhase::Authenticating,
                 });
@@ -357,6 +410,14 @@ impl App {
                 self.service.authenticate(creds);
             }
             AppAction::LoginSuccess => {
+                if let Some(ref creds) = self.pending_credentials {
+                    if self.pending_remember {
+                        Self::save_credentials(creds);
+                    } else {
+                        Self::delete_credentials(&creds.username);
+                    }
+                }
+                self.pending_credentials = None;
                 self.state = AppState::Main(MainState {
                     active_tab: Tab::Selector,
                     selector_phase: SelectorPhase::Idle,
@@ -440,10 +501,16 @@ impl App {
                 self.dispatch(AppAction::StartNextDownload);
             }
 
-            AppAction::Error(err) => {
+            AppAction::Error(ref err) => {
+                let is_auth_error = matches!(err, TuiError::Authentication { .. });
                 match &mut self.state {
                     AppState::Login(ref mut login) => {
                         login.phase = LoginPhase::Input;
+                        if is_auth_error {
+                            if let Some(ref creds) = self.pending_credentials {
+                                Self::delete_credentials(&creds.username);
+                            }
+                        }
                     }
                     AppState::Main(ref mut main) => {
                         main.selector_phase = SelectorPhase::Idle;
