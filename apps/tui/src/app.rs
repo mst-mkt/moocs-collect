@@ -617,7 +617,9 @@ impl App {
                         }
                     }
                     AppState::Main(ref mut main) => {
-                        main.selector_phase = SelectorPhase::Idle;
+                        if main.selector_phase != SelectorPhase::EnqueuePending {
+                            main.selector_phase = SelectorPhase::Idle;
+                        }
                     }
                 }
                 self.error = Some(err.user_message());

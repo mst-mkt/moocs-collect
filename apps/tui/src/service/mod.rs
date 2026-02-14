@@ -68,7 +68,9 @@ impl AppService {
 
     pub fn fetch_archive_years(&self) {
         let api = self.api.clone();
+        let semaphore = self.semaphore.clone();
         self.task.spawn(async move {
+            let _permit = semaphore.acquire().await.ok();
             match api.get_archive_years().await {
                 Ok(years) => AppAction::ArchiveYearsLoaded(years),
                 Err(e) => AppAction::Error(e),
@@ -78,9 +80,11 @@ impl AppService {
 
     pub fn fetch_courses(&self) {
         let api = self.api.clone();
+        let semaphore = self.semaphore.clone();
         let year = self.year.and_then(|y| Year::new(y).ok());
 
         self.task.spawn(async move {
+            let _permit = semaphore.acquire().await.ok();
             match api.get_courses(year).await {
                 Ok(courses) => AppAction::CoursesLoaded(courses),
                 Err(e) => AppAction::Error(e),
@@ -90,8 +94,10 @@ impl AppService {
 
     pub fn fetch_lectures(&self, course_key: CourseKey) {
         let api = self.api.clone();
+        let semaphore = self.semaphore.clone();
 
         self.task.spawn(async move {
+            let _permit = semaphore.acquire().await.ok();
             match api.get_lectures(&course_key).await {
                 Ok(lectures) => AppAction::LecturesLoaded(course_key, lectures),
                 Err(e) => AppAction::Error(e),
@@ -101,8 +107,10 @@ impl AppService {
 
     pub fn fetch_pages(&self, lecture_key: LectureKey) {
         let api = self.api.clone();
+        let semaphore = self.semaphore.clone();
 
         self.task.spawn(async move {
+            let _permit = semaphore.acquire().await.ok();
             match api.get_pages(&lecture_key).await {
                 Ok(pages) => AppAction::PagesLoaded(lecture_key, pages),
                 Err(e) => AppAction::Error(e),
