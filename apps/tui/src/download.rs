@@ -2,7 +2,7 @@ use collect::{pdf, Collect, PageKey, SlideContent};
 use color_eyre::eyre::Result;
 use futures::stream::{self, StreamExt};
 use rayon::prelude::*;
-use std::{fs::create_dir_all, path::Path, sync::Arc, time::Duration};
+use std::{fs::create_dir_all, path::{Path, PathBuf}, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, Semaphore};
 
 const MAX_RETRIES: u32 = 3;
@@ -75,9 +75,9 @@ async fn save_slides(
     path: &Path,
     page_key: &PageKey,
     tx: &mpsc::Sender<DownloadEvent>,
-) -> Result<()> {
+) -> Result<Vec<PathBuf>> {
     if slide_contents.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     send_progress(tx, page_key, 60, "前処理中...").await;
@@ -113,11 +113,11 @@ async fn save_slides(
     let page_title = page_info.page_title.clone();
     let len = preprocessed.len();
 
-    tokio::task::spawn_blocking(move || {
-        preprocessed
+    let files = tokio::task::spawn_blocking(move || {
+        let results: Result<Vec<PathBuf>> = preprocessed
             .par_iter()
             .enumerate()
-            .try_for_each(|(i, content)| -> Result<()> {
+            .map(|(i, content)| -> Result<PathBuf> {
                 let filename = match len {
                     1 => format!(
                         "{} - {}.pdf",
@@ -135,14 +135,16 @@ async fn save_slides(
                 let mut document = pdf::convert(content)?;
                 let file_path = path_clone.join(&filename);
                 document.save(&file_path)?;
-                Ok(())
+                Ok(file_path)
             })
+            .collect();
+        results
     })
     .await??;
 
     send_progress(tx, page_key, 95, "保存完了").await;
 
-    Ok(())
+    Ok(files)
 }
 
 pub async fn download_page(
@@ -152,12 +154,12 @@ pub async fn download_page(
     download_path: &Path,
     tx: &mpsc::Sender<DownloadEvent>,
     semaphore: &Arc<Semaphore>,
-) -> Result<()> {
+) -> Result<Vec<PathBuf>> {
     send_progress(tx, page_key, 5, "スライド取得中...").await;
 
     let slides = collect.get_slides(page_key).await?;
     if slides.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     send_progress(
@@ -219,9 +221,9 @@ pub async fn download_page(
     indexed_contents.sort_by_key(|(i, _)| *i);
     let contents: Vec<_> = indexed_contents.into_iter().map(|(_, c)| c).collect();
 
-    save_slides(collect, client, &contents, download_path, page_key, tx).await?;
+    let dir = save_slides(collect, client, &contents, download_path, page_key, tx).await?;
 
-    Ok(())
+    Ok(dir)
 }
 
 async fn send_progress(

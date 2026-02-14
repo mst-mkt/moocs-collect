@@ -16,6 +16,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::components::{
+    download::DownloadAction,
     login::LoginAction,
     selector::SelectorAction,
     settings::SettingsAction,
@@ -49,7 +50,7 @@ pub enum AppAction {
     StartNextDownload,
 
     DownloadProgress(PageKey, u8, String),
-    DownloadCompleted(PageKey),
+    DownloadCompleted(PageKey, Vec<PathBuf>),
     DownloadFailed(PageKey, String),
 
     FetchArchiveYears,
@@ -314,6 +315,9 @@ impl App {
                 Span::styled("↑↓", ks),
                 Span::styled(": 移動", ds),
                 Span::raw("  "),
+                Span::styled("Enter", ks),
+                Span::styled(": 開く", ds),
+                Span::raw("  "),
                 Span::styled("Tab", ks),
                 Span::styled(": タブ切替", ds),
             ],
@@ -444,7 +448,15 @@ impl App {
                         }
                     }
                     Tab::Download => {
-                        let _ = self.download.handle_event(Event::Key(key));
+                        if let Some(action) = self.download.handle_event(Event::Key(key)) {
+                            match action {
+                                DownloadAction::Open(files) => {
+                                    for file in &files {
+                                        let _ = open::that(file);
+                                    }
+                                }
+                            }
+                        }
                     }
                     Tab::Settings => {
                         if let Some(action) = self.settings.handle_event(Event::Key(key)) {
@@ -562,8 +574,8 @@ impl App {
             AppAction::DownloadProgress(page_key, progress, ref phase) => {
                 self.download.update_progress(&page_key, progress, phase);
             }
-            AppAction::DownloadCompleted(page_key) => {
-                self.download.mark_completed(&page_key);
+            AppAction::DownloadCompleted(page_key, files) => {
+                self.download.mark_completed(&page_key, files);
                 self.dispatch(AppAction::StartNextDownload);
             }
             AppAction::DownloadFailed(page_key, msg) => {

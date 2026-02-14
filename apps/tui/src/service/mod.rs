@@ -149,7 +149,7 @@ impl AppService {
             let (result, ()) = tokio::join!(download_task, forward_task);
 
             match result {
-                Ok(()) => AppAction::DownloadCompleted(pk),
+                Ok(path) => AppAction::DownloadCompleted(pk, path),
                 Err(e) => AppAction::DownloadFailed(pk, format!("{e:#}")),
             }
         });

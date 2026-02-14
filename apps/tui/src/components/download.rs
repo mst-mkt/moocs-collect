@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use collect::PageKey;
 use crossterm::event::{Event, KeyCode, KeyEvent};
@@ -27,8 +28,13 @@ pub struct ResolvedPage {
 pub enum DownloadStatus {
     Pending,
     Downloading(u8, String),
-    Completed,
+    Completed(Vec<PathBuf>),
     Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum DownloadAction {
+    Open(Vec<PathBuf>),
 }
 
 #[derive(Debug, Clone)]
@@ -45,11 +51,11 @@ pub struct DownloadComponent {
 }
 
 impl Component for DownloadComponent {
-    type Action = ();
+    type Action = DownloadAction;
 
     fn handle_event(&mut self, event: Event) -> Option<Self::Action> {
         if let Event::Key(key) = event {
-            self.handle_key_event(key);
+            return self.handle_key_event(key);
         }
         None
     }
@@ -111,9 +117,9 @@ impl DownloadComponent {
         }
     }
 
-    pub fn mark_completed(&mut self, page_key: &PageKey) {
+    pub fn mark_completed(&mut self, page_key: &PageKey, files: Vec<PathBuf>) {
         if let Some(&idx) = self.index.get(page_key) {
-            self.items[idx].status = DownloadStatus::Completed;
+            self.items[idx].status = DownloadStatus::Completed(files);
         }
     }
 
@@ -123,7 +129,7 @@ impl DownloadComponent {
         }
     }
 
-    fn handle_key_event(&mut self, key: KeyEvent) {
+    fn handle_key_event(&mut self, key: KeyEvent) -> Option<DownloadAction> {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 move_list_selection(&mut self.list_state, self.items.len(), -1);
@@ -131,8 +137,20 @@ impl DownloadComponent {
             KeyCode::Down | KeyCode::Char('j') => {
                 move_list_selection(&mut self.list_state, self.items.len(), 1);
             }
+            KeyCode::Enter => {
+                if let Some(idx) = self.list_state.selected() {
+                    if let Some(item) = self.items.get(idx) {
+                        if let DownloadStatus::Completed(ref files) = item.status {
+                            if !files.is_empty() {
+                                return Some(DownloadAction::Open(files.clone()));
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
+        None
     }
 
     fn render_download_list(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -191,7 +209,7 @@ impl DownloadComponent {
                             ),
                         ])
                     }
-                    DownloadStatus::Completed => Line::from(vec![
+                    DownloadStatus::Completed(_) => Line::from(vec![
                         Span::raw("  "),
                         Span::styled("█".repeat(PROGRESS_BAR_WIDTH), theme.success_style()),
                         Span::styled(" 100% 完了", theme.success_style()),
@@ -229,7 +247,7 @@ fn build_summary_title<'a>(items: &[DownloadItem], theme: &'a Theme) -> Line<'a>
     let total = items.len();
     let completed = items
         .iter()
-        .filter(|i| i.status == DownloadStatus::Completed)
+        .filter(|i| matches!(i.status, DownloadStatus::Completed(_)))
         .count();
     let downloading = items
         .iter()
