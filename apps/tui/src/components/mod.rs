@@ -6,10 +6,12 @@ use crate::ui::Theme;
 pub mod download;
 pub mod login;
 pub mod selector;
+pub mod settings;
 
 pub use download::DownloadComponent;
 pub use login::LoginComponent;
 pub use selector::SelectorComponent;
+pub use settings::SettingsComponent;
 
 pub trait Component {
     type Action;

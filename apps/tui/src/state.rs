@@ -25,6 +25,7 @@ pub struct MainState {
 pub enum Tab {
     Selector,
     Download,
+    Settings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

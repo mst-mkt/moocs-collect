@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod app;
 mod components;
+mod config;
 mod download;
 mod error;
 mod service;
@@ -25,8 +26,8 @@ struct Args {
     #[arg(long)]
     year: Option<u32>,
 
-    #[arg(long, short = 'j', default_value = "5")]
-    concurrency: usize,
+    #[arg(long, short = 'j')]
+    concurrency: Option<usize>,
 }
 
 #[tokio::main]

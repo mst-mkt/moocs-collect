@@ -1,4 +1,6 @@
-use collect::{Collect, Course, CourseKey, Credentials, Lecture, LectureKey, LecturePage, PageKey};
+use collect::{
+    Collect, Course, CourseKey, Credentials, Lecture, LectureKey, LecturePage, PageKey, Year,
+};
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
@@ -10,12 +12,16 @@ use ratatui::{
     Frame,
 };
 use std::{path::PathBuf, sync::Arc};
+
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::components::{
-    login::LoginAction, selector::SelectorAction, Component, DownloadComponent, LoginComponent,
-    SelectorComponent,
+    login::LoginAction,
+    selector::SelectorAction,
+    settings::SettingsAction,
+    Component, DownloadComponent, LoginComponent, SelectorComponent, SettingsComponent,
 };
+use crate::config::{self, Config};
 use crate::error::TuiError;
 use crate::service::AppService;
 use crate::state::{AppState, LoginPhase, LoginState, MainState, SelectorPhase, Tab};
@@ -46,6 +52,12 @@ pub enum AppAction {
     DownloadCompleted(PageKey),
     DownloadFailed(PageKey, String),
 
+    FetchArchiveYears,
+    ArchiveYearsLoaded(Vec<Year>),
+    ChangeYear(Option<u32>),
+    ChangePath(PathBuf),
+    ChangeConcurrency(usize),
+
     Error(TuiError),
 
     ClearError,
@@ -60,6 +72,7 @@ pub struct App {
     login: LoginComponent,
     selector: SelectorComponent,
     download: DownloadComponent,
+    settings: SettingsComponent,
     theme: Theme,
     service: AppService,
     action_rx: mpsc::Receiver<AppAction>,
@@ -68,7 +81,21 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(download_path: Option<PathBuf>, year: Option<u32>, concurrency: usize) -> Self {
+    pub fn new(
+        cli_path: Option<PathBuf>,
+        cli_year: Option<u32>,
+        cli_concurrency: Option<usize>,
+    ) -> Self {
+        let saved = config::load();
+
+        let download_path = cli_path
+            .or_else(|| saved.download_path.map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let download_path = config::resolve_path(&download_path);
+
+        let year = cli_year.or(saved.year);
+        let concurrency = cli_concurrency.or(saved.concurrency).unwrap_or(5);
+
         let (action_tx, action_rx) = mpsc::channel(32);
 
         let client = reqwest::Client::builder()
@@ -77,14 +104,13 @@ impl App {
             .build()
             .unwrap_or_default();
         let collect = Collect::from(Arc::new(client.clone()));
-        let download_path = download_path.unwrap_or_else(|| PathBuf::from("."));
 
         let service = AppService::new(
             collect,
             client,
             Arc::new(Semaphore::new(MAX_HTTP_PERMITS)),
             action_tx,
-            download_path,
+            download_path.clone(),
             year,
         );
 
@@ -106,6 +132,7 @@ impl App {
             login,
             selector: SelectorComponent::new(),
             download: DownloadComponent::new(),
+            settings: SettingsComponent::new(&download_path, year, concurrency),
             theme: Theme::default(),
             service,
             action_rx,
@@ -208,6 +235,7 @@ impl App {
                 match main_state.active_tab {
                     Tab::Selector => self.selector.render(frame, content_area, &self.theme),
                     Tab::Download => self.download.render(frame, content_area, &self.theme),
+                    Tab::Settings => self.settings.render(frame, content_area, &self.theme),
                 }
 
                 self.render_footer(frame, footer_area);
@@ -224,12 +252,17 @@ impl App {
     }
 
     fn render_tab_bar(&self, frame: &mut Frame, area: Rect) {
-        let titles = vec![Line::from("講義一覧"), Line::from("ダウンロード")];
+        let titles = vec![
+            Line::from("講義一覧"),
+            Line::from("ダウンロード"),
+            Line::from("設定"),
+        ];
 
         let selected = if let AppState::Main(main_state) = &self.state {
             match main_state.active_tab {
                 Tab::Selector => 0,
                 Tab::Download => 1,
+                Tab::Settings => 2,
             }
         } else {
             0
@@ -284,6 +317,19 @@ impl App {
                 Span::styled("Tab", ks),
                 Span::styled(": タブ切替", ds),
             ],
+            Tab::Settings => vec![
+                Span::styled("↑↓", ks),
+                Span::styled(": 移動", ds),
+                Span::raw("  "),
+                Span::styled("←→", ks),
+                Span::styled(": 変更", ds),
+                Span::raw("  "),
+                Span::styled("Enter", ks),
+                Span::styled(": 編集", ds),
+                Span::raw("  "),
+                Span::styled("Tab", ks),
+                Span::styled(": タブ切替", ds),
+            ],
         };
 
         let action_spans = match active_tab {
@@ -297,7 +343,9 @@ impl App {
                 Span::styled("q", ks),
                 Span::styled(": 終了", ds),
             ],
-            Tab::Download => vec![Span::styled("q", ks), Span::styled(": 終了", ds)],
+            Tab::Download | Tab::Settings => {
+                vec![Span::styled("q", ks), Span::styled(": 終了", ds)]
+            }
         };
 
         if inner.width >= MIN_FOOTER_WIDTH {
@@ -359,15 +407,21 @@ impl App {
                 }
             }
             AppState::Main(main_state) => {
-                if matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
+                let is_settings_editing =
+                    main_state.active_tab == Tab::Settings && self.settings.is_editing();
+
+                if !is_settings_editing
+                    && matches!(code, KeyCode::Esc | KeyCode::Char('q'))
+                {
                     self.dispatch(AppAction::Quit);
                     return;
                 }
 
-                if code == KeyCode::Tab {
+                if !is_settings_editing && code == KeyCode::Tab {
                     let new_tab = match main_state.active_tab {
                         Tab::Selector => Tab::Download,
-                        Tab::Download => Tab::Selector,
+                        Tab::Download => Tab::Settings,
+                        Tab::Settings => Tab::Selector,
                     };
                     self.dispatch(AppAction::SwitchTab(new_tab));
                     return;
@@ -391,6 +445,21 @@ impl App {
                     }
                     Tab::Download => {
                         let _ = self.download.handle_event(Event::Key(key));
+                    }
+                    Tab::Settings => {
+                        if let Some(action) = self.settings.handle_event(Event::Key(key)) {
+                            match action {
+                                SettingsAction::Year(year) => {
+                                    self.dispatch(AppAction::ChangeYear(year));
+                                }
+                                SettingsAction::Path(path) => {
+                                    self.dispatch(AppAction::ChangePath(path));
+                                }
+                                SettingsAction::Concurrency(n) => {
+                                    self.dispatch(AppAction::ChangeConcurrency(n));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -424,6 +493,7 @@ impl App {
                 });
                 self.error = None;
                 self.dispatch(AppAction::FetchCourses);
+                self.dispatch(AppAction::FetchArchiveYears);
             }
 
             AppAction::FetchCourses => {
@@ -501,6 +571,28 @@ impl App {
                 self.dispatch(AppAction::StartNextDownload);
             }
 
+            AppAction::FetchArchiveYears => {
+                self.service.fetch_archive_years();
+            }
+            AppAction::ArchiveYearsLoaded(years) => {
+                self.settings.set_available_years(years);
+            }
+            AppAction::ChangeYear(year) => {
+                self.service.set_year(year);
+                self.selector = SelectorComponent::new();
+                self.dispatch(AppAction::FetchCourses);
+                self.save_settings();
+            }
+            AppAction::ChangePath(path) => {
+                let resolved = config::resolve_path(&path);
+                self.service.set_download_path(resolved);
+                self.save_settings();
+            }
+            AppAction::ChangeConcurrency(n) => {
+                self.concurrency = n;
+                self.save_settings();
+            }
+
             AppAction::Error(ref err) => {
                 let is_auth_error = matches!(err, TuiError::Authentication { .. });
                 match &mut self.state {
@@ -570,5 +662,14 @@ impl App {
                 break;
             }
         }
+    }
+
+    fn save_settings(&self) {
+        let cfg = Config::from_current(
+            self.service.download_path(),
+            self.service.year(),
+            self.concurrency,
+        );
+        config::save(&cfg);
     }
 }

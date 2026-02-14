@@ -40,11 +40,37 @@ impl AppService {
         }
     }
 
+    pub fn download_path(&self) -> &std::path::Path {
+        &self.download_path
+    }
+
+    pub const fn year(&self) -> Option<u32> {
+        self.year
+    }
+
     pub fn authenticate(&self, credentials: Credentials) {
         let api = self.api.clone();
         self.task.spawn(async move {
             match api.authenticate(&credentials).await {
                 Ok(()) => AppAction::LoginSuccess,
+                Err(e) => AppAction::Error(e),
+            }
+        });
+    }
+
+    pub const fn set_year(&mut self, year: Option<u32>) {
+        self.year = year;
+    }
+
+    pub fn set_download_path(&mut self, path: PathBuf) {
+        self.download_path = path;
+    }
+
+    pub fn fetch_archive_years(&self) {
+        let api = self.api.clone();
+        self.task.spawn(async move {
+            match api.get_archive_years().await {
+                Ok(years) => AppAction::ArchiveYearsLoaded(years),
                 Err(e) => AppAction::Error(e),
             }
         });

@@ -33,6 +33,13 @@ impl ApiClient {
             .map_err(|e| TuiError::from_collect(e, "講義一覧"))
     }
 
+    pub async fn get_archive_years(&self) -> Result<Vec<Year>, TuiError> {
+        self.collect
+            .get_archive_years()
+            .await
+            .map_err(|e| TuiError::from_collect(e, "年度一覧"))
+    }
+
     pub async fn get_pages(&self, lecture_key: &LectureKey) -> Result<Vec<LecturePage>, TuiError> {
         self.collect
             .get_pages(lecture_key)
